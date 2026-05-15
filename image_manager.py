@@ -19,12 +19,6 @@ class ImageManager:
         "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
         "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
     )
-    SYSTEM_FONT_CANDIDATES = (
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/msyh.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-    )
 
     def __init__(self, config: dict):
         self.proxy = config.get("proxy_url") if config.get("use_proxy") else None
@@ -58,13 +52,12 @@ class ImageManager:
         except Exception:
             return False
 
-    def _get_system_font_path(self) -> str | None:
-        for font_path in self.SYSTEM_FONT_CANDIDATES:
-            if not Path(font_path).exists():
-                continue
-            if self._is_font_file_usable(Path(font_path)):
-                return font_path
-        return None
+    def _remove_file_if_exists(self, file_path: Path):
+        try:
+            if file_path.exists():
+                file_path.unlink()
+        except Exception:
+            pass
 
     async def ensure_default_font(self, data_dir: Path) -> str | None:
         font_dir = Path(data_dir) / "fonts"
@@ -77,6 +70,10 @@ class ImageManager:
         async with self._font_download_lock:
             if target_path.exists() and await asyncio.to_thread(self._is_font_file_usable, target_path):
                 return str(target_path)
+
+            if target_path.exists():
+                logger.warning(f"Preset table font cache is invalid, removing and re-downloading: {target_path}")
+                await asyncio.to_thread(self._remove_file_if_exists, target_path)
 
             tmp_path = target_path.with_name(f"{target_path.stem}.download{target_path.suffix}")
             download_timeout = max(int(self.timeout), 180)
@@ -104,12 +101,10 @@ class ImageManager:
                         except Exception:
                             pass
 
-        system_font = self._get_system_font_path()
-        if system_font:
-            logger.warning(f"Preset table font download failed, fallback to system font: {system_font}")
-            return system_font
-
-        logger.warning("Preset table font download failed, fallback to Pillow default font")
+        logger.error(
+            "Preset table font download failed. The plugin will automatically retry installation on the next startup "
+            "or the next preset-table render request. Docker users should ensure the container can access one of the configured font URLs."
+        )
         return None
 
     def _optimize_output_image_sync(self, raw: bytes) -> bytes:
@@ -657,14 +652,7 @@ class ImageManager:
             pass
 
         if not font:
-            # 回退系统字体
-            for p in self.SYSTEM_FONT_CANDIDATES:
-                if Path(p).exists():
-                    try:
-                        font = ImageFont.truetype(p, fs)
-                        break
-                    except:
-                        continue
+            logger.warning("Preset table font unavailable, falling back to Pillow default font. Chinese text may render incorrectly.")
         if not font: font = ImageFont.load_default()
 
         image_area_h = int(ch * 0.8)
