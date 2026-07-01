@@ -7,11 +7,7 @@ import socket
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 import aiohttp
-<<<<<<< HEAD
-from typing import List, Dict
-=======
 from typing import List, Dict, Tuple, Optional
->>>>>>> 644277e (1)
 from astrbot import logger
 
 
@@ -20,12 +16,7 @@ class ApiManager:
         self.config = config
         self.key_lock = asyncio.Lock()
         self.generic_idx = 0
-<<<<<<< HEAD
-        self.gemini_idx = 0
-        self._session = None # 保持 Session 持久化，复用 TCP/SSL 连接
-=======
         self._session = None  # 保持 Session 持久化，复用 TCP/SSL 连接
->>>>>>> 644277e (1)
         self._last_metrics = {}
         self._last_download_metrics = {}
 
@@ -41,10 +32,7 @@ class ApiManager:
             "download_duration": 0.0,
             "total_duration": 0.0,
             "download_route": "",
-<<<<<<< HEAD
-=======
             "model": "",
->>>>>>> 644277e (1)
         }
         self._last_download_metrics = {
             "download_duration": 0.0,
@@ -54,18 +42,6 @@ class ApiManager:
     def get_last_metrics(self) -> Dict:
         return dict(self._last_metrics or {})
 
-<<<<<<< HEAD
-    def _normalize_call_api_args(self, legacy_use_power_or_proxy=None, proxy=None, use_text_to_image_api: bool = False):
-        """兼容旧版 call_api 调用签名：
-        - 新版: call_api(images, prompt, model, proxy, use_text_to_image_api=...)
-        - 旧版: call_api(images, prompt, model, False, proxy)
-        """
-        resolved_proxy = proxy
-        resolved_use_text_to_image_api = bool(use_text_to_image_api)
-
-        if isinstance(legacy_use_power_or_proxy, bool):
-            # 旧版 use_power 参数，现已废弃，直接忽略
-=======
     def _normalize_call_api_args(self, legacy_use_power_or_proxy=None, proxy=None):
         """兼容旧版 call_api 调用签名：
         - 新版: call_api(images, prompt, model, proxy)
@@ -74,7 +50,6 @@ class ApiManager:
         resolved_proxy = proxy
 
         if isinstance(legacy_use_power_or_proxy, bool):
->>>>>>> 644277e (1)
             pass
         else:
             if resolved_proxy is None:
@@ -86,60 +61,7 @@ class ApiManager:
         if resolved_proxy is not None:
             resolved_proxy = str(resolved_proxy).strip() or None
 
-<<<<<<< HEAD
-        return resolved_proxy, resolved_use_text_to_image_api
-
-    def _get_luxury_request_count(self) -> int:
-        """获取奢侈模式并发请求数。"""
-        try:
-            count = int(self.config.get("luxury_request_count", 3) or 3)
-        except Exception:
-            count = 3
-        return max(1, count)
-
-    async def _call_api_with_luxury_mode(self, images: List[bytes], prompt: str,
-                                         model: str, proxy: str = None,
-                                         use_text_to_image_api: bool = False) -> bytes | str:
-        """奢侈模式：同一请求并发多次，只取首个成功结果，其余丢弃。"""
-        luxury_count = self._get_luxury_request_count()
-        if luxury_count <= 1:
-            return await self._call_api_once(images, prompt, model, proxy, use_text_to_image_api)
-
-        logger.info(f"奢侈模式已启用：同一请求并发 {luxury_count} 次，仅取其中一张成功图片")
-
-        tasks = [
-            asyncio.create_task(self._call_api_once(images, prompt, model, proxy, use_text_to_image_api))
-            for _ in range(luxury_count)
-        ]
-
-        first_error = "奢侈模式下所有并发请求均失败"
-        success_result = None
-
-        try:
-            for completed in asyncio.as_completed(tasks):
-                try:
-                    result = await completed
-                except Exception as e:
-                    result = f"系统错误: {e}"
-
-                if isinstance(result, bytes) and result:
-                    success_result = result
-                    break
-
-                if isinstance(result, str) and result and first_error == "奢侈模式下所有并发请求均失败":
-                    first_error = result
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        if success_result is not None:
-            return success_result
-        return first_error
-=======
         return resolved_proxy
->>>>>>> 644277e (1)
 
     def _should_bypass_proxy(self, url: str) -> bool:
         """本地/内网地址不走代理，避免请求本地中转时反而绕远路。"""
@@ -179,47 +101,6 @@ class ApiManager:
             return None
         return proxy
 
-<<<<<<< HEAD
-    async def get_key(self, mode: str, use_text_to_image_api: bool = False) -> str | None:
-        """获取轮询 Key"""
-        async with self.key_lock:
-            if use_text_to_image_api:
-                if mode == "gemini_official":
-                    keys = self.config.get("text_to_image_api_keys", [])
-                    if not keys:
-                        keys = self.config.get("gemini_api_keys", [])
-                    if not keys:
-                        return None
-                    k = keys[self.gemini_idx % len(keys)]
-                    self.gemini_idx += 1
-                    return k
-                else:
-                    keys = self.config.get("text_to_image_api_keys", [])
-                    if not keys:
-                        keys = self.config.get("generic_api_keys", [])
-                    if not keys:
-                        return None
-                    k = keys[self.generic_idx % len(keys)]
-                    self.generic_idx += 1
-                    return k
-
-            if mode == "gemini_official":
-                keys = self.config.get("gemini_api_keys", [])
-
-                if not keys:
-                    return None
-                k = keys[self.gemini_idx % len(keys)]
-                self.gemini_idx += 1
-                return k
-            else:
-                keys = self.config.get("generic_api_keys", [])
-
-                if not keys:
-                    return None
-                k = keys[self.generic_idx % len(keys)]
-                self.generic_idx += 1
-                return k
-=======
     async def get_source(self) -> Tuple[str, str, str, bool, bool] | None:
         """获取当前激活的图片信息源的 (base_url, key, model, prefer_images_api, force_images_api) 元组。
 
@@ -299,7 +180,6 @@ class ApiManager:
                 return None
 
             return url, key, video_model
->>>>>>> 644277e (1)
 
     def extract_image_url(self, data: Dict) -> str | None:
         """解析各种奇怪的 API 返回格式"""
@@ -407,31 +287,8 @@ class ApiManager:
                 elif "text" in choice: # Legacy completion
                     content = choice["text"]
 
-<<<<<<< HEAD
-            # ================== 3. Google Gemini Official ==================
-            # 格式: {"candidates": [{"content": {"parts": [{"inlineData": ...}, {"text": ...}]}}]}
-            if "candidates" in data and isinstance(data["candidates"], list) and len(data["candidates"]) > 0:
-                candidate = data["candidates"][0]
-                if "content" in candidate and "parts" in candidate["content"]:
-                    parts = candidate["content"]["parts"]
-                    if parts and isinstance(parts, list):
-                        # 优先找 inlineData
-                        for part in parts:
-                            if "inlineData" in part:
-                                mime = part["inlineData"].get("mimeType", "image/png")
-                                d = part["inlineData"].get("data", "")
-                                return f"data:{mime};base64,{d}"
-                        
-                        # 其次找 text 里的链接
-                        texts = [p.get("text", "") for p in parts if "text" in p]
-                        content = "\n".join(texts)
-
-            # ================== Common Content Extraction ==================
-            # 如果从 ChatCompletion 或 Gemini Text 中提取到了文本内容，尝试解析 URL 或 Base64
-=======
             # ================== Common Content Extraction ==================
             # 如果从 ChatCompletion 中提取到了文本内容，尝试解析 URL 或 Base64
->>>>>>> 644277e (1)
             if content:
                 # 0. 尝试提取其中包含的 data URI (最宽泛的匹配策略)
                 # 能够匹配 markdown 内部、纯文本、或者被截断的内容
@@ -1027,27 +884,6 @@ class ApiManager:
         return f"结果图片下载失败: {last_error}"
 
     async def call_api(self, images: List[bytes], prompt: str,
-<<<<<<< HEAD
-                       model: str, legacy_use_power_or_proxy=None,
-                       proxy: str = None,
-                       use_text_to_image_api: bool = False) -> bytes | str:
-        proxy, use_text_to_image_api = self._normalize_call_api_args(
-            legacy_use_power_or_proxy, proxy, use_text_to_image_api
-        )
-
-        if self.config.get("enable_luxury_mode", False):
-            return await self._call_api_with_luxury_mode(
-                images, prompt, model, proxy, use_text_to_image_api
-            )
-
-        return await self._call_api_once(
-            images, prompt, model, proxy, use_text_to_image_api
-        )
-
-    async def _call_api_once(self, images: List[bytes], prompt: str,
-                             model: str, proxy: str = None,
-                             use_text_to_image_api: bool = False) -> bytes | str:
-=======
                        model: str = "", legacy_use_power_or_proxy=None,
                        proxy: str = None) -> bytes | str:
         proxy = self._normalize_call_api_args(
@@ -1060,53 +896,11 @@ class ApiManager:
 
     async def _call_api_once(self, images: List[bytes], prompt: str,
                              model: str, proxy: str = None) -> bytes | str:
->>>>>>> 644277e (1)
         """核心生成逻辑"""
 
         self._reset_metrics()
         call_start = asyncio.get_running_loop().time()
 
-<<<<<<< HEAD
-        mode = self.config.get("api_mode", "generic")
-
-        # 1. 确定 URL
-        if use_text_to_image_api:
-            if mode == "gemini_official":
-                base = (
-                    self.config.get("text_to_image_api_url")
-                    or self.config.get("gemini_api_url")
-                )
-            else:
-                base = (
-                    self.config.get("text_to_image_api_url")
-                    or self.config.get("generic_api_url")
-                )
-        else:
-            if mode == "gemini_official":
-                base = self.config.get("gemini_api_url")
-            else:
-                base = self.config.get("generic_api_url")
-
-        if not base:
-            return "API URL 未配置"
-
-        # 2. 获取 Key
-        key = await self.get_key(mode, use_text_to_image_api=use_text_to_image_api)
-        if not key:
-            return "无可用 API Key"
-
-        # 3. 构造请求
-        headers = {"Content-Type": "application/json"}
-        payload = {}
-        url = base.rstrip("/")
-
-        # 对于明确使用 Generic 图片接口的站点，可配置为优先直连 Images API
-        # 但当输入为多图时，优先走 chat/completions 以保留全部参考图（Images API 常只接受单图编辑）。
-        if mode == "generic" and self.config.get("generic_prefer_images_api", False):
-            if len(images) <= 1:
-                logger.info("已启用 generic_prefer_images_api，优先直接走 Images API")
-                image_api_result = await self.call_images_api(images, prompt, model, key, base, proxy)
-=======
         # 1. 通过多源轮询获取 (base_url, key, model, prefer_images_api)
         source = await self.get_source()
         if not source:
@@ -1133,7 +927,6 @@ class ApiManager:
             if len(images) <= 1:
                 logger.info("已启用 prefer_images_api，优先直接走 Images API")
                 image_api_result = await self.call_images_api(images, prompt, model, key, base_url, proxy)
->>>>>>> 644277e (1)
                 if not (
                         images
                         and isinstance(image_api_result, str)
@@ -1141,12 +934,6 @@ class ApiManager:
                 ):
                     return image_api_result
                 logger.warning("Preferred Images API edits endpoint is unsupported; falling back to chat/completions.")
-<<<<<<< HEAD
-            logger.info(
-                "generic_prefer_images_api 已启用，但检测到多图输入，"
-                "为保留全部参考图改走 chat/completions"
-            )
-=======
             else:
                 logger.info(
                     "prefer_images_api 已启用，但检测到多图输入，"
@@ -1156,95 +943,11 @@ class ApiManager:
         # 3. 构造 Generic (OpenAI 格式) 请求
         headers = {"Content-Type": "application/json"}
         headers["Authorization"] = f"Bearer {key}"
->>>>>>> 644277e (1)
 
         # 画质强化 Prompt
         res_set = self.config.get("image_resolution", "1K")
         final_prompt = f"(Masterpiece, Best Quality, {res_set} Resolution), {prompt}" if res_set != "1K" else prompt
 
-<<<<<<< HEAD
-        if mode == "gemini_official":
-            # --- 修复核心：Gemini URL 智能构造 ---
-            # 如果 URL 里没有 'models' 关键字且不是 OneAPI 风格，说明填的是 Base URL
-
-            # 补全 v1/v1beta
-            if "/v1" not in url and "/v1beta" not in url:
-                url += "/v1beta"
-
-            # 补全 /models
-            if "/models" not in url:
-                url += "/models"
-
-            # 拼接 Model (防止 url 中已经包含了 model)
-            if f"/{model}" not in url:
-                url += f"/{model}"
-
-            # 拼接动作
-            if ":generateContent" not in url:
-                url += ":generateContent"
-
-            # 认证：Query 参数 + Header 双重保险
-            if "?" in url:
-                url += f"&key={key}"
-            else:
-                url += f"?key={key}"
-            headers["x-goog-api-key"] = key
-
-            parts = [{"text": final_prompt}]
-            for img in images:
-                mime = self.get_mime_type(img)
-                parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(img).decode()}})
-
-            payload = {
-                "contents": [{"parts": parts}],
-                "generationConfig": {
-                    "maxOutputTokens": 4096,
-                    "responseModalities": ["TEXT", "IMAGE"],
-                    # "aspectRatio": "1:1" # Gemini 可能需要显式比例，暂保持默认
-                },
-                "safetySettings": [{"category": c, "threshold": "BLOCK_NONE"} for c in
-                                   ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
-                                    "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
-                                    "HARM_CATEGORY_CIVIC_INTEGRITY"]] # 参考: 增加 CIVIC_INTEGRITY
-            }
-        else:
-            # OpenAI / Generic 构造：允许用户只填写 Base URL，自动补全 chat/completions
-            url = self._normalize_generic_chat_url(url)
-            headers["Authorization"] = f"Bearer {key}"
-            
-            content_list = [{"type": "text", "text": final_prompt}]
-            for img in images:
-                b64 = base64.b64encode(img).decode()
-                mime = self.get_mime_type(img)
-                content_list.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{b64}"}
-                })
-            
-            msgs = [{"role": "user", "content": content_list}]
-            
-            use_stream = self.config.get("use_stream", False)
-            
-            # [性能优化] 显式设置 max_tokens
-            # 如果不设置，某些中转接口可能会等待或者分配过大的 Tokens 空间，增加延迟
-            pl = {"model": model, "messages": msgs, "stream": use_stream, "max_tokens": 4096}
-            payload.update(pl)
-
-            # 针对 Gemini 系模型的 OpenAI 兼容层特殊处理
-            # 参考 bananic_ninjutsu: 如果模型名包含 pro/image/banana，显式添加 modalities
-            lower_model = model.lower()
-            if "gemini" in lower_model or "pro" in lower_model or "image" in lower_model:
-                # 无论何种模式，只要模型名看起来像 Gemini，就尝试注入 modalities
-                payload["modalities"] = ["image", "text"]
-
-                # 尝试强制注入 safetySettings (很多中转支持透传此参数)
-                # 这能有效防止 finish_reason: content_filter
-                payload["safetySettings"] = [{"category": c, "threshold": "BLOCK_NONE"} for c in
-                                             ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
-                                              "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
-                                              "HARM_CATEGORY_CIVIC_INTEGRITY"]]
-        
-=======
         url = self._normalize_generic_chat_url(base_url)
 
         content_list = [{"type": "text", "text": final_prompt}]
@@ -1274,26 +977,15 @@ class ApiManager:
                                           "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
                                           "HARM_CATEGORY_CIVIC_INTEGRITY"]]
 
->>>>>>> 644277e (1)
         # 4. 发送请求
         try:
             timeout_val = self.config.get("timeout", 120)
             timeout = aiohttp.ClientTimeout(total=timeout_val)
-<<<<<<< HEAD
-            
-            # 使用持久化 Session，避免重复的 TCP/SSL 握手开销
-            session = await self._get_session()
-            
-            candidate_urls = [url]
-            if mode == "generic":
-                candidate_urls = self._build_candidate_generic_chat_urls(base)
-=======
 
             # 使用持久化 Session，避免重复的 TCP/SSL 握手开销
             session = await self._get_session()
 
             candidate_urls = self._build_candidate_generic_chat_urls(base_url)
->>>>>>> 644277e (1)
 
             logger.info(f"Generic API 候选地址: {candidate_urls}")
 
@@ -1321,15 +1013,9 @@ class ApiManager:
                             if "error" in err_json:
                                 err_msg = json.dumps(err_json["error"], ensure_ascii=False)
 
-<<<<<<< HEAD
-                                if mode == "generic" and self._should_fallback_to_images_api(err_msg, bool(images)):
-                                    logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
-                                    return await self.call_images_api(images, prompt, model, key, base, proxy)
-=======
                                 if self._should_fallback_to_images_api(err_msg, bool(images)):
                                     logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
                                     return await self.call_images_api(images, prompt, model, key, base_url, proxy)
->>>>>>> 644277e (1)
 
                                 return f"API Error {resp.status}: {err_msg} | URL: {active_url}"
 
@@ -1337,33 +1023,15 @@ class ApiManager:
                             if any(k in err_json for k in ["message", "type", "code", "param"]):
                                 err_msg = json.dumps(err_json, ensure_ascii=False)
 
-<<<<<<< HEAD
-                                if mode == "generic" and self._should_fallback_to_images_api(err_msg, bool(images)):
-                                    logger.info(f"模型 {model} 返回顶层错误结构，自动回退到 Images API")
-                                    return await self.call_images_api(images, prompt, model, key, base, proxy)
-=======
                                 if self._should_fallback_to_images_api(err_msg, bool(images)):
                                     logger.info(f"模型 {model} 返回顶层错误结构，自动回退到 Images API")
                                     return await self.call_images_api(images, prompt, model, key, base_url, proxy)
->>>>>>> 644277e (1)
 
                                 return f"API Error {resp.status}: {err_msg} | URL: {active_url}"
                         except:
                             pass
 
                         if "<html" in resp_text.lower():
-<<<<<<< HEAD
-                            if mode == "generic":
-                                return (
-                                    f"HTTP {resp.status}: 服务端返回了网页而非数据。当前尝试地址: {active_url}。\n"
-                                    f"请填写 API 基础地址，而不是网站首页。例如应填写接口所在前缀，如 https://域名/api 或 https://域名/openai。"
-                                )
-                            return f"HTTP {resp.status}: 服务端返回了网页而非数据，请检查URL配置。"
-
-                        if mode == "generic" and self._should_fallback_to_images_api(resp_text, bool(images)):
-                            logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
-                            return await self.call_images_api(images, prompt, model, key, base, proxy)
-=======
                             return (
                                 f"HTTP {resp.status}: 服务端返回了网页而非数据。当前尝试地址: {active_url}。\n"
                                 f"请填写 API 基础地址，而不是网站首页。例如应填写接口所在前缀，如 https://域名/api 或 https://域名/openai。"
@@ -1372,7 +1040,6 @@ class ApiManager:
                         if self._should_fallback_to_images_api(resp_text, bool(images)):
                             logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
                             return await self.call_images_api(images, prompt, model, key, base_url, proxy)
->>>>>>> 644277e (1)
 
                         return f"HTTP {resp.status}: {resp_text[:200]} | URL: {active_url}"
 
@@ -1500,11 +1167,7 @@ class ApiManager:
 
             img_url = self.extract_image_url(res_data)
 
-<<<<<<< HEAD
-            # 终极 fallback，检查是否是那种直接放在外层的 tool_calls / images 遗漏
-=======
             # 终极 fallback
->>>>>>> 644277e (1)
             if not img_url:
                 raw_str = str(res_data)
                 b64_match = re.search(r'(data:image\/[\w\-\+\.]+(?:;base64)?,[\w\-\+\/=\s]{100,})', raw_str)
@@ -1532,32 +1195,7 @@ class ApiManager:
                     img_url = raw_resp_url_match.group(1).rstrip(")>,'\".")
 
             if not img_url:
-<<<<<<< HEAD
-                # Gemini 特殊错误诊断 (原生 API)
-                if "candidates" in res_data and res_data["candidates"]:
-                    cand = res_data["candidates"][0]
-                    finish_reason = cand.get("finishReason", "UNKNOWN")
-
-                    if finish_reason not in ["STOP", "MAX_TOKENS"]:
-                        return f"生成被终止，原因: {finish_reason} (通常是安全过滤导致)"
-
-                    content_obj = cand.get("content") or {}
-                    parts = content_obj.get("parts")
-                    if not parts:
-                        cand_str = json.dumps(cand, ensure_ascii=False)
-                        logger.warning(f"Gemini API returned empty parts: {cand_str}")
-                        return f"模型响应为空 (finishReason={finish_reason})。请确认使用的模型 ({model}) 是否支持生图，或者 Prompt 是否触发了隐性过滤。\nRaw: {cand_str[:100]}..."
-                    else:
-                        texts = [p.get("text", "") for p in parts if "text" in p]
-                        if texts:
-                            text_msg = "\n".join(texts).strip()
-                            if text_msg:
-                                return text_msg
-
-                # OpenAI 格式错误诊断 (兼容 API)
-=======
                 # OpenAI 格式错误诊断
->>>>>>> 644277e (1)
                 if "choices" in res_data and isinstance(res_data["choices"], list) and len(res_data["choices"]) > 0:
                     choice = res_data["choices"][0]
                     finish_reason = choice.get("finish_reason", "UNKNOWN")
@@ -1603,11 +1241,7 @@ class ApiManager:
 
             # 如果是 URL，需要再次下载（增加重试与容错，避免外链偶发失败）
             upstream_duration = asyncio.get_running_loop().time() - call_start
-<<<<<<< HEAD
-            result = await self._download_result_image(img_url, proxy, base)
-=======
             result = await self._download_result_image(img_url, proxy, base_url)
->>>>>>> 644277e (1)
             total_duration = asyncio.get_running_loop().time() - call_start
             self._last_metrics = {
                 "upstream_duration": upstream_duration,
@@ -1630,10 +1264,6 @@ class ApiManager:
             err_msg = str(e)
             if not err_msg:
                 err_msg = type(e).__name__
-<<<<<<< HEAD
-            
-            return f"系统错误: {err_msg}"
-=======
 
             return f"系统错误: {err_msg}"
 
@@ -2010,4 +1640,3 @@ class ApiManager:
             return "视频下载超时"
         except Exception as e:
             return f"视频下载异常: {e}"
->>>>>>> 644277e (1)
