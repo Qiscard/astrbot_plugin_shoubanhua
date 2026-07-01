@@ -1,4 +1,4 @@
-﻿import re
+import re
 import time
 import asyncio
 import json
@@ -38,8 +38,8 @@ _CLOTHING_KEYWORDS = [
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方OpenAI绘图格式的文生图/图生图插件，支持多源API配置和LLM智能判断",
-    "2.9.0",
-    "https://github.com/shskjw/astrbot_plugin_shoubanhua",
+    "3.0.1",
+    "https://github.com/Qiscard/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
     _DEPRECATED_CONFIG_KEYS = [
@@ -683,7 +683,7 @@ class FigurineProPlugin(Star):
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
         logger.info(
-            f"FigurinePro 插件已加载 v2.9.0 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
+            f"FigurinePro 插件已加载 v3.0.1 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 
     def is_admin(self, event: AstrMessageEvent) -> bool:
         return event.get_sender_id() in self.context.get_config().get("admins_id", [])
@@ -701,7 +701,7 @@ class FigurineProPlugin(Star):
             try:
                 sid = self.context.get_self_id()
                 if sid: return str(sid)
-            except:
+            except Exception:
                 pass
 
         # 3. 再次：从 event.robot 获取 (旧版适配)
@@ -716,7 +716,7 @@ class FigurineProPlugin(Star):
             try:
                 sid = event.get_self_id()
                 if sid: return str(sid)
-            except:
+            except Exception:
                 pass
 
         logger.debug(f"FigurinePro: Bot ID resolved as: {bot_id}")
