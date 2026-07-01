@@ -7,7 +7,11 @@ import socket
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 import aiohttp
+<<<<<<< HEAD
 from typing import List, Dict
+=======
+from typing import List, Dict, Tuple, Optional
+>>>>>>> 644277e (1)
 from astrbot import logger
 
 
@@ -16,8 +20,12 @@ class ApiManager:
         self.config = config
         self.key_lock = asyncio.Lock()
         self.generic_idx = 0
+<<<<<<< HEAD
         self.gemini_idx = 0
         self._session = None # 保持 Session 持久化，复用 TCP/SSL 连接
+=======
+        self._session = None  # 保持 Session 持久化，复用 TCP/SSL 连接
+>>>>>>> 644277e (1)
         self._last_metrics = {}
         self._last_download_metrics = {}
 
@@ -33,6 +41,10 @@ class ApiManager:
             "download_duration": 0.0,
             "total_duration": 0.0,
             "download_route": "",
+<<<<<<< HEAD
+=======
+            "model": "",
+>>>>>>> 644277e (1)
         }
         self._last_download_metrics = {
             "download_duration": 0.0,
@@ -42,6 +54,7 @@ class ApiManager:
     def get_last_metrics(self) -> Dict:
         return dict(self._last_metrics or {})
 
+<<<<<<< HEAD
     def _normalize_call_api_args(self, legacy_use_power_or_proxy=None, proxy=None, use_text_to_image_api: bool = False):
         """兼容旧版 call_api 调用签名：
         - 新版: call_api(images, prompt, model, proxy, use_text_to_image_api=...)
@@ -52,6 +65,16 @@ class ApiManager:
 
         if isinstance(legacy_use_power_or_proxy, bool):
             # 旧版 use_power 参数，现已废弃，直接忽略
+=======
+    def _normalize_call_api_args(self, legacy_use_power_or_proxy=None, proxy=None):
+        """兼容旧版 call_api 调用签名：
+        - 新版: call_api(images, prompt, model, proxy)
+        - 旧版: call_api(images, prompt, model, False, proxy)
+        """
+        resolved_proxy = proxy
+
+        if isinstance(legacy_use_power_or_proxy, bool):
+>>>>>>> 644277e (1)
             pass
         else:
             if resolved_proxy is None:
@@ -63,6 +86,7 @@ class ApiManager:
         if resolved_proxy is not None:
             resolved_proxy = str(resolved_proxy).strip() or None
 
+<<<<<<< HEAD
         return resolved_proxy, resolved_use_text_to_image_api
 
     def _get_luxury_request_count(self) -> int:
@@ -113,6 +137,9 @@ class ApiManager:
         if success_result is not None:
             return success_result
         return first_error
+=======
+        return resolved_proxy
+>>>>>>> 644277e (1)
 
     def _should_bypass_proxy(self, url: str) -> bool:
         """本地/内网地址不走代理，避免请求本地中转时反而绕远路。"""
@@ -152,6 +179,7 @@ class ApiManager:
             return None
         return proxy
 
+<<<<<<< HEAD
     async def get_key(self, mode: str, use_text_to_image_api: bool = False) -> str | None:
         """获取轮询 Key"""
         async with self.key_lock:
@@ -191,6 +219,87 @@ class ApiManager:
                 k = keys[self.generic_idx % len(keys)]
                 self.generic_idx += 1
                 return k
+=======
+    async def get_source(self) -> Tuple[str, str, str, bool, bool] | None:
+        """获取当前激活的图片信息源的 (base_url, key, model, prefer_images_api, force_images_api) 元组。
+
+        自动跳过视频源（有 video_model 的条目），只在图片源中选择。
+
+        Returns:
+            (base_url, key, model, prefer_images_api, force_images_api) 或 None
+        """
+        async with self.key_lock:
+            all_sources = self.config.get("generic_sources", [])
+            if all_sources:
+                # 过滤掉视频源，只保留图片源
+                image_sources = [
+                    s for s in all_sources
+                    if not str(s.get("video_model", "")).strip()
+                ]
+                if not image_sources:
+                    return None
+
+                active_idx = int(self.config.get("generic_active_source", 1)) - 1
+                if active_idx < 0 or active_idx >= len(image_sources):
+                    active_idx = 0
+                src = image_sources[active_idx]
+                url = src.get("url", "")
+                src_model = src.get("model", "nano-banana")
+                prefer_images = src.get("prefer_images_api", False)
+                force_images = src.get("force_images_api", False)
+                if not url:
+                    return None
+
+                keys = src.get("keys", [])
+                if keys:
+                    k = keys[self.generic_idx % len(keys)]
+                    self.generic_idx += 1
+                    return url, k, src_model, prefer_images, force_images
+
+                return None
+
+            url = self.config.get("generic_api_url", "")
+            keys = self.config.get("generic_api_keys", [])
+            if url and keys:
+                k = keys[self.generic_idx % len(keys)]
+                self.generic_idx += 1
+                return url, k, self.config.get("model", "nano-banana"), self.config.get("generic_prefer_images_api", False), False
+
+            return None
+
+    async def get_video_source(self) -> Tuple[str, str, str] | None:
+        """获取当前激活的视频信息源的 (base_url, key, video_model) 元组。
+
+        从 generic_sources 中查找 grok_video 类型的模板条目，
+        使用 generic_active_video_source 确定当前激活源。
+
+        Returns:
+            (base_url, key, video_model) 或 None
+        """
+        async with self.key_lock:
+            sources = self.config.get("generic_sources", [])
+            video_sources = [
+                s for s in sources
+                if str(s.get("video_model", "")).strip()
+            ]
+            if not video_sources:
+                return None
+
+            active_idx = int(self.config.get("generic_active_video_source", 1)) - 1
+            if active_idx < 0 or active_idx >= len(video_sources):
+                active_idx = 0
+            src = video_sources[active_idx]
+            url = src.get("url", "")
+            video_model = str(src.get("video_model", "")).strip()
+            if not url or not video_model:
+                return None
+
+            key = str(src.get("key", "")).strip()
+            if not key:
+                return None
+
+            return url, key, video_model
+>>>>>>> 644277e (1)
 
     def extract_image_url(self, data: Dict) -> str | None:
         """解析各种奇怪的 API 返回格式"""
@@ -298,6 +407,7 @@ class ApiManager:
                 elif "text" in choice: # Legacy completion
                     content = choice["text"]
 
+<<<<<<< HEAD
             # ================== 3. Google Gemini Official ==================
             # 格式: {"candidates": [{"content": {"parts": [{"inlineData": ...}, {"text": ...}]}}]}
             if "candidates" in data and isinstance(data["candidates"], list) and len(data["candidates"]) > 0:
@@ -318,6 +428,10 @@ class ApiManager:
 
             # ================== Common Content Extraction ==================
             # 如果从 ChatCompletion 或 Gemini Text 中提取到了文本内容，尝试解析 URL 或 Base64
+=======
+            # ================== Common Content Extraction ==================
+            # 如果从 ChatCompletion 中提取到了文本内容，尝试解析 URL 或 Base64
+>>>>>>> 644277e (1)
             if content:
                 # 0. 尝试提取其中包含的 data URI (最宽泛的匹配策略)
                 # 能够匹配 markdown 内部、纯文本、或者被截断的内容
@@ -913,6 +1027,7 @@ class ApiManager:
         return f"结果图片下载失败: {last_error}"
 
     async def call_api(self, images: List[bytes], prompt: str,
+<<<<<<< HEAD
                        model: str, legacy_use_power_or_proxy=None,
                        proxy: str = None,
                        use_text_to_image_api: bool = False) -> bytes | str:
@@ -932,11 +1047,26 @@ class ApiManager:
     async def _call_api_once(self, images: List[bytes], prompt: str,
                              model: str, proxy: str = None,
                              use_text_to_image_api: bool = False) -> bytes | str:
+=======
+                       model: str = "", legacy_use_power_or_proxy=None,
+                       proxy: str = None) -> bytes | str:
+        proxy = self._normalize_call_api_args(
+            legacy_use_power_or_proxy, proxy
+        )
+
+        return await self._call_api_once(
+            images, prompt, model, proxy
+        )
+
+    async def _call_api_once(self, images: List[bytes], prompt: str,
+                             model: str, proxy: str = None) -> bytes | str:
+>>>>>>> 644277e (1)
         """核心生成逻辑"""
 
         self._reset_metrics()
         call_start = asyncio.get_running_loop().time()
 
+<<<<<<< HEAD
         mode = self.config.get("api_mode", "generic")
 
         # 1. 确定 URL
@@ -976,6 +1106,34 @@ class ApiManager:
             if len(images) <= 1:
                 logger.info("已启用 generic_prefer_images_api，优先直接走 Images API")
                 image_api_result = await self.call_images_api(images, prompt, model, key, base, proxy)
+=======
+        # 1. 通过多源轮询获取 (base_url, key, model, prefer_images_api)
+        source = await self.get_source()
+        if not source:
+            return "API URL 或 Key 未配置"
+        base_url, key, source_model, source_prefer_images, source_force_images = source
+
+        # 1.1 如果调用方未指定模型，使用信息源配置的模型
+        if not model:
+            model = source_model
+        if not model:
+            return "模型未配置"
+
+        self._last_metrics["model"] = model
+
+        # 2. 对于明确使用 Generic 图片接口的站点，可配置为优先直连 Images API
+        # force_images_api: 无论单图多图都走 images API（仅用第一张图）
+        # prefer_images_api: 单图时走 images API，多图时回退 chat/completions
+        if source_force_images:
+            logger.info("已启用 force_images_api，走 Images API")
+            image_api_result = await self.call_images_api(images, prompt, model, key, base_url, proxy)
+            # force 模式不降级，直接返回结果（成功或失败）
+            return image_api_result
+        elif source_prefer_images:
+            if len(images) <= 1:
+                logger.info("已启用 prefer_images_api，优先直接走 Images API")
+                image_api_result = await self.call_images_api(images, prompt, model, key, base_url, proxy)
+>>>>>>> 644277e (1)
                 if not (
                         images
                         and isinstance(image_api_result, str)
@@ -983,15 +1141,28 @@ class ApiManager:
                 ):
                     return image_api_result
                 logger.warning("Preferred Images API edits endpoint is unsupported; falling back to chat/completions.")
+<<<<<<< HEAD
             logger.info(
                 "generic_prefer_images_api 已启用，但检测到多图输入，"
                 "为保留全部参考图改走 chat/completions"
             )
+=======
+            else:
+                logger.info(
+                    "prefer_images_api 已启用，但检测到多图输入，"
+                    "为保留全部参考图改走 chat/completions"
+                )
+
+        # 3. 构造 Generic (OpenAI 格式) 请求
+        headers = {"Content-Type": "application/json"}
+        headers["Authorization"] = f"Bearer {key}"
+>>>>>>> 644277e (1)
 
         # 画质强化 Prompt
         res_set = self.config.get("image_resolution", "1K")
         final_prompt = f"(Masterpiece, Best Quality, {res_set} Resolution), {prompt}" if res_set != "1K" else prompt
 
+<<<<<<< HEAD
         if mode == "gemini_official":
             # --- 修复核心：Gemini URL 智能构造 ---
             # 如果 URL 里没有 'models' 关键字且不是 OneAPI 风格，说明填的是 Base URL
@@ -1073,10 +1244,42 @@ class ApiManager:
                                               "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
                                               "HARM_CATEGORY_CIVIC_INTEGRITY"]]
         
+=======
+        url = self._normalize_generic_chat_url(base_url)
+
+        content_list = [{"type": "text", "text": final_prompt}]
+        for img in images:
+            b64 = base64.b64encode(img).decode()
+            mime = self.get_mime_type(img)
+            content_list.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"}
+            })
+
+        msgs = [{"role": "user", "content": content_list}]
+        payload = {}
+        use_stream = self.config.get("use_stream", False)
+
+        # [性能优化] 显式设置 max_tokens
+        pl = {"model": model, "messages": msgs, "stream": use_stream, "max_tokens": 4096}
+        payload.update(pl)
+
+        # 针对 Gemini/Imagen 系模型的 OpenAI 兼容层特殊处理
+        # 即使移除原生 Gemini 模式，中转站仍可能通过 OpenAI 格式代理 Gemini 模型
+        lower_model = model.lower()
+        if "gemini" in lower_model or "imagen" in lower_model:
+            payload["modalities"] = ["image", "text"]
+            payload["safetySettings"] = [{"category": c, "threshold": "BLOCK_NONE"} for c in
+                                         ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+                                          "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
+                                          "HARM_CATEGORY_CIVIC_INTEGRITY"]]
+
+>>>>>>> 644277e (1)
         # 4. 发送请求
         try:
             timeout_val = self.config.get("timeout", 120)
             timeout = aiohttp.ClientTimeout(total=timeout_val)
+<<<<<<< HEAD
             
             # 使用持久化 Session，避免重复的 TCP/SSL 握手开销
             session = await self._get_session()
@@ -1084,6 +1287,13 @@ class ApiManager:
             candidate_urls = [url]
             if mode == "generic":
                 candidate_urls = self._build_candidate_generic_chat_urls(base)
+=======
+
+            # 使用持久化 Session，避免重复的 TCP/SSL 握手开销
+            session = await self._get_session()
+
+            candidate_urls = self._build_candidate_generic_chat_urls(base_url)
+>>>>>>> 644277e (1)
 
             logger.info(f"Generic API 候选地址: {candidate_urls}")
 
@@ -1111,9 +1321,15 @@ class ApiManager:
                             if "error" in err_json:
                                 err_msg = json.dumps(err_json["error"], ensure_ascii=False)
 
+<<<<<<< HEAD
                                 if mode == "generic" and self._should_fallback_to_images_api(err_msg, bool(images)):
                                     logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
                                     return await self.call_images_api(images, prompt, model, key, base, proxy)
+=======
+                                if self._should_fallback_to_images_api(err_msg, bool(images)):
+                                    logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
+                                    return await self.call_images_api(images, prompt, model, key, base_url, proxy)
+>>>>>>> 644277e (1)
 
                                 return f"API Error {resp.status}: {err_msg} | URL: {active_url}"
 
@@ -1121,15 +1337,22 @@ class ApiManager:
                             if any(k in err_json for k in ["message", "type", "code", "param"]):
                                 err_msg = json.dumps(err_json, ensure_ascii=False)
 
+<<<<<<< HEAD
                                 if mode == "generic" and self._should_fallback_to_images_api(err_msg, bool(images)):
                                     logger.info(f"模型 {model} 返回顶层错误结构，自动回退到 Images API")
                                     return await self.call_images_api(images, prompt, model, key, base, proxy)
+=======
+                                if self._should_fallback_to_images_api(err_msg, bool(images)):
+                                    logger.info(f"模型 {model} 返回顶层错误结构，自动回退到 Images API")
+                                    return await self.call_images_api(images, prompt, model, key, base_url, proxy)
+>>>>>>> 644277e (1)
 
                                 return f"API Error {resp.status}: {err_msg} | URL: {active_url}"
                         except:
                             pass
 
                         if "<html" in resp_text.lower():
+<<<<<<< HEAD
                             if mode == "generic":
                                 return (
                                     f"HTTP {resp.status}: 服务端返回了网页而非数据。当前尝试地址: {active_url}。\n"
@@ -1140,6 +1363,16 @@ class ApiManager:
                         if mode == "generic" and self._should_fallback_to_images_api(resp_text, bool(images)):
                             logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
                             return await self.call_images_api(images, prompt, model, key, base, proxy)
+=======
+                            return (
+                                f"HTTP {resp.status}: 服务端返回了网页而非数据。当前尝试地址: {active_url}。\n"
+                                f"请填写 API 基础地址，而不是网站首页。例如应填写接口所在前缀，如 https://域名/api 或 https://域名/openai。"
+                            )
+
+                        if self._should_fallback_to_images_api(resp_text, bool(images)):
+                            logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
+                            return await self.call_images_api(images, prompt, model, key, base_url, proxy)
+>>>>>>> 644277e (1)
 
                         return f"HTTP {resp.status}: {resp_text[:200]} | URL: {active_url}"
 
@@ -1267,7 +1500,11 @@ class ApiManager:
 
             img_url = self.extract_image_url(res_data)
 
+<<<<<<< HEAD
             # 终极 fallback，检查是否是那种直接放在外层的 tool_calls / images 遗漏
+=======
+            # 终极 fallback
+>>>>>>> 644277e (1)
             if not img_url:
                 raw_str = str(res_data)
                 b64_match = re.search(r'(data:image\/[\w\-\+\.]+(?:;base64)?,[\w\-\+\/=\s]{100,})', raw_str)
@@ -1295,6 +1532,7 @@ class ApiManager:
                     img_url = raw_resp_url_match.group(1).rstrip(")>,'\".")
 
             if not img_url:
+<<<<<<< HEAD
                 # Gemini 特殊错误诊断 (原生 API)
                 if "candidates" in res_data and res_data["candidates"]:
                     cand = res_data["candidates"][0]
@@ -1317,6 +1555,9 @@ class ApiManager:
                                 return text_msg
 
                 # OpenAI 格式错误诊断 (兼容 API)
+=======
+                # OpenAI 格式错误诊断
+>>>>>>> 644277e (1)
                 if "choices" in res_data and isinstance(res_data["choices"], list) and len(res_data["choices"]) > 0:
                     choice = res_data["choices"][0]
                     finish_reason = choice.get("finish_reason", "UNKNOWN")
@@ -1362,7 +1603,11 @@ class ApiManager:
 
             # 如果是 URL，需要再次下载（增加重试与容错，避免外链偶发失败）
             upstream_duration = asyncio.get_running_loop().time() - call_start
+<<<<<<< HEAD
             result = await self._download_result_image(img_url, proxy, base)
+=======
+            result = await self._download_result_image(img_url, proxy, base_url)
+>>>>>>> 644277e (1)
             total_duration = asyncio.get_running_loop().time() - call_start
             self._last_metrics = {
                 "upstream_duration": upstream_duration,
@@ -1385,5 +1630,384 @@ class ApiManager:
             err_msg = str(e)
             if not err_msg:
                 err_msg = type(e).__name__
+<<<<<<< HEAD
             
             return f"系统错误: {err_msg}"
+=======
+
+            return f"系统错误: {err_msg}"
+
+    # ==================== 通用响应解析（视频/图片共用） ====================
+
+    def _extract_media_from_chunk(self, chunk: dict) -> Tuple[Optional[str], Optional[str]]:
+        """从 SSE chunk 中递归提取媒体 URL 或 base64，返回 (url, b64)"""
+        url = None
+        b64 = None
+
+        def search(obj):
+            nonlocal url, b64
+            if url or b64:
+                return
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k in ("url", "image_url", "video_url") and isinstance(v, str):
+                        if v.startswith("data:"):
+                            if "base64," in v:
+                                b64 = v.split("base64,", 1)[1]
+                        elif v.startswith("http"):
+                            url = v
+                    elif k in ("b64_json", "base64") and isinstance(v, str) and len(v) > 100:
+                        b64 = v
+                    else:
+                        search(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    search(item)
+
+        search(chunk)
+        return url, b64
+
+    def _parse_json_response(self, data: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """解析 JSON 响应，返回 (url, base64, text)"""
+        url = None
+        b64 = None
+        text = None
+
+        # OpenAI images 格式: {"data": [{"url": "..."} or {"b64_json": "..."}]}
+        if "data" in data and isinstance(data["data"], list):
+            for item in data["data"]:
+                if isinstance(item, dict):
+                    if item.get("url"):
+                        url = item["url"]
+                    if item.get("b64_json"):
+                        b64 = item["b64_json"]
+
+        # Chat Completions 格式
+        if "choices" in data:
+            for choice in data.get("choices", []):
+                msg = choice.get("message") or choice.get("delta") or {}
+                content = msg.get("content")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            if part.get("type") == "image_url":
+                                img_url = part.get("image_url", {}).get("url", "")
+                                if img_url.startswith("data:") and "base64," in img_url:
+                                    b64 = img_url.split("base64,", 1)[1]
+                                elif img_url.startswith("http"):
+                                    url = img_url
+                            elif part.get("type") == "text":
+                                text = part.get("text", "")
+
+        # 直接字段
+        for key in ("url", "image_url", "video_url", "media_url", "file_url"):
+            if data.get(key):
+                url = data[key]
+                break
+
+        if not b64:
+            for key in ("b64_json", "base64", "image_base64", "data"):
+                val = data.get(key)
+                if val and isinstance(val, str) and len(val) > 100:
+                    b64 = val
+                    break
+
+        for key in ("content", "text", "result", "output", "message"):
+            val = data.get(key)
+            if val and isinstance(val, str):
+                text = val
+                break
+
+        return url, b64, text
+
+    # ==================== 视频生成 ====================
+
+    _VIDEO_SUPPORTED_LENGTHS = (6, 10, 15)
+    _VIDEO_DEFAULT_LENGTH = 6
+    _VIDEO_TIMEOUT = 300
+
+    def _parse_video_aspect_ratio(self, text: str) -> str:
+        """从用户输入中解析视频比例，默认 3:2"""
+        for ratio in ("16:9", "9:16", "3:2", "2:3", "1:1"):
+            if ratio in text:
+                return ratio
+        return "3:2"
+
+    def _parse_video_length(self, text: str) -> int:
+        """从用户输入中解析视频时长（秒），默认 6。支持 '10秒'、'10s'、独立数字 '10'。"""
+        # 先匹配带单位的: 10秒, 10s
+        match = re.search(r'(\d+)\s*[秒sS]', text)
+        if match:
+            val = int(match.group(1))
+            if val in self._VIDEO_SUPPORTED_LENGTHS:
+                return val
+        # 再匹配独立数字（前后为空格或字符串边界，且值在支持列表中）
+        for token in text.split():
+            if token.isdigit() and int(token) in self._VIDEO_SUPPORTED_LENGTHS:
+                return int(token)
+        return self._VIDEO_DEFAULT_LENGTH
+
+    async def call_video_api(
+        self, images: List[bytes], prompt: str,
+        aspect_ratio: str = "3:2", video_length: int = 6,
+    ) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+        """调用视频生成 API（Grok /v1/chat/completions + video_config）。
+
+        Returns:
+            (video_bytes, video_url, error_msg)
+        """
+        source = await self.get_video_source()
+        if not source:
+            return None, None, "未配置视频源，请在 WebUI 中添加 Grok 视频源"
+        base_url, key, video_model = source
+
+        # 校验视频时长
+        if video_length not in self._VIDEO_SUPPORTED_LENGTHS:
+            video_length = self._VIDEO_DEFAULT_LENGTH
+
+        chat_url = self._normalize_generic_chat_url(base_url)
+
+        # 提示词增强：追加画质和一致性要求
+        enhancement = "画面要求：高细节、清晰边缘、低噪点、运动稳定、时序一致。输出风格自然，不要过度锐化。"
+        if images:
+            enhancement += "保持参考图主体身份、构图和色调风格一致。"
+        else:
+            enhancement += "主体动作连贯，镜头转场平滑。"
+        enhanced_prompt = f"{prompt}\n\n{enhancement}"
+
+        content_blocks: List[Dict] = [{"type": "text", "text": enhanced_prompt}]
+        for img in (images or []):
+            b64 = base64.b64encode(img).decode()
+            mime = self.get_mime_type(img)
+            content_blocks.append(
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+            )
+        messages = [{"role": "user", "content": content_blocks}]
+
+        # video_config 候选：先带 preset，失败则去掉
+        video_configs = [
+            {"aspect_ratio": aspect_ratio, "resolution_name": "720p",
+             "video_length": video_length, "preset": "custom"},
+            {"aspect_ratio": aspect_ratio, "resolution_name": "720p",
+             "video_length": video_length},
+        ]
+
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+        timeout = aiohttp.ClientTimeout(total=self._VIDEO_TIMEOUT)
+        session = await self._get_session()
+
+        for vc in video_configs:
+            payload = {
+                "model": video_model, "messages": messages,
+                "stream": True, "video_config": vc,
+            }
+            need_fallback = False
+            for attempt in range(3):
+                try:
+                    current_proxy = self._get_request_proxy(chat_url)
+                    async with session.post(
+                        chat_url, json=payload, headers=headers,
+                        proxy=current_proxy, timeout=timeout,
+                    ) as resp:
+                        if resp.status != 200:
+                            text = await resp.text()
+                            err_detail = self._extract_api_error_message(text) or f"状态码: {resp.status}"
+                            logger.error(f"[视频] API 失败 {resp.status}: {err_detail[:200]}")
+                            if vc.get("preset") and resp.status == 400:
+                                need_fallback = True
+                                break
+                            if attempt < 2 and resp.status in (408, 429, 500, 502, 503, 504):
+                                await asyncio.sleep(min(1.5 * (2 ** attempt), 4.0))
+                                continue
+                            return None, None, f"视频生成失败: {err_detail[:200]}"
+
+                        video_bytes, video_url, parse_err = await self._parse_video_response(resp)
+                        if parse_err:
+                            if attempt < 2:
+                                await asyncio.sleep(min(1.5 * (2 ** attempt), 4.0))
+                                continue
+                            return None, None, parse_err
+                        return video_bytes, video_url, None
+
+                except asyncio.TimeoutError:
+                    if attempt < 2:
+                        await asyncio.sleep(min(1.5 * (2 ** attempt), 4.0))
+                        continue
+                    return None, None, f"视频生成超时 ({self._VIDEO_TIMEOUT}s)"
+                except Exception as e:
+                    if attempt < 2:
+                        await asyncio.sleep(min(1.5 * (2 ** attempt), 4.0))
+                        continue
+                    logger.error(f"[视频] 请求异常: {e}")
+                    return None, None, f"系统错误: {e}"
+
+            if need_fallback:
+                continue
+
+        return None, None, "视频生成失败"
+
+    async def _parse_video_response(self, resp) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+        """解析视频 API 的 SSE 流式响应，提取视频 URL 或 base64。"""
+        extracted_url: Optional[str] = None
+        extracted_b64: Optional[str] = None
+        raw_content = b""
+        is_streaming = False
+        accumulated_text = []
+
+        async for line in resp.content:
+            if len(raw_content) > 50 * 1024 * 1024:
+                return None, None, "响应数据过大"
+            raw_content += line
+            if not line or not line.strip():
+                continue
+            try:
+                line_str = line.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                continue
+
+            payload_str = None
+            if line_str.startswith("data: "):
+                payload_str = line_str[6:]
+            elif line_str.startswith("data:"):
+                payload_str = line_str[5:]
+
+            if payload_str is not None:
+                is_streaming = True
+                payload_str = payload_str.strip()
+                if payload_str in ("[DONE]", "done", ""):
+                    continue
+                try:
+                    chunk = json.loads(payload_str)
+                    url, b64 = self._extract_media_from_chunk(chunk)
+                    if url:
+                        extracted_url = url
+                    if b64:
+                        extracted_b64 = b64
+                    text = self._extract_chunk_text(chunk)
+                    if text:
+                        accumulated_text.append(text)
+                except json.JSONDecodeError:
+                    if payload_str.startswith(("http://", "https://")):
+                        extracted_url = payload_str.split()[0]
+
+        if not is_streaming and raw_content:
+            try:
+                data = json.loads(raw_content.decode("utf-8"))
+                url, b64, text = self._parse_json_response(data)
+                if url:
+                    extracted_url = url
+                if b64:
+                    extracted_b64 = b64
+                if text:
+                    accumulated_text.append(text)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+
+        full_text = "".join(accumulated_text)
+        if not extracted_url and not extracted_b64 and full_text:
+            extracted_url = self._extract_url_from_text(full_text)
+            if not extracted_url:
+                extracted_b64 = self._extract_base64_from_text(full_text)
+
+        if extracted_b64:
+            try:
+                return base64.b64decode(extracted_b64), None, None
+            except Exception as e:
+                return None, None, f"Base64 解码失败: {e}"
+        if extracted_url:
+            return None, extracted_url, None
+
+        return None, None, "未能从响应中提取视频内容"
+
+    @staticmethod
+    def _extract_chunk_text(chunk: dict) -> Optional[str]:
+        """从 SSE chunk 中提取文本"""
+        if "choices" in chunk:
+            for choice in chunk.get("choices", []):
+                delta = choice.get("delta") or choice.get("message") or {}
+                content = delta.get("content")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    return "".join(
+                        p.get("text", "") if isinstance(p, dict) else str(p)
+                        for p in content
+                    )
+        for key in ("content", "text", "result", "output"):
+            val = chunk.get(key)
+            if isinstance(val, str):
+                return val
+        return None
+
+    @staticmethod
+    def _extract_api_error_message(raw_text: str) -> str:
+        """从 API 错误响应中提取可读信息"""
+        if not raw_text:
+            return ""
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return raw_text[:300]
+        if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict):
+                return str(err.get("message", raw_text[:300]))
+            if isinstance(err, str):
+                return err
+        return raw_text[:300]
+
+    @staticmethod
+    def _extract_url_from_text(text: str) -> Optional[str]:
+        """从文本中提取视频 URL"""
+        if not text:
+            return None
+        patterns = [
+            r'(https?://[^\s<>"\'\)\]\\]+\.(?:mp4|webm|mov)(?:[?#][^\s<>"\'\)\]\\]*)?)',
+            r'"url"\s*:\s*"(https?://[^"]+)"',
+            r'(https?://[^\s<>"\'\)\]\\]+)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                url = match.group(1)
+                if url.startswith(("http://", "https://")):
+                    return url
+        return None
+
+    @staticmethod
+    def _extract_base64_from_text(text: str) -> Optional[str]:
+        """从文本中提取 Base64 数据"""
+        if not text:
+            return None
+        match = re.search(r'data:[^;]+;base64,([A-Za-z0-9+/=]+)', text)
+        if match:
+            return match.group(1)
+        match = re.search(r'([A-Za-z0-9+/]{100,}={0,2})', text)
+        if match:
+            return match.group(1)
+        return None
+
+    async def _download_video(self, url: str, proxy: str = None) -> bytes | str:
+        """下载视频文件（专用方法，使用视频适配的请求头）"""
+        try:
+            session = await self._get_session()
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "video/mp4,video/*,*/*;q=0.8",
+            }
+            current_proxy = self._get_request_proxy(url, proxy)
+            async with session.get(url, headers=headers, proxy=current_proxy,
+                                   timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                if resp.status != 200:
+                    return f"视频下载失败: HTTP {resp.status}"
+                data = await resp.read()
+                if len(data) < 100:
+                    return "视频下载失败: 文件过小"
+                return data
+        except asyncio.TimeoutError:
+            return "视频下载超时"
+        except Exception as e:
+            return f"视频下载异常: {e}"
+>>>>>>> 644277e (1)

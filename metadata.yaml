@@ -1,4 +1,5 @@
 name: astrbot_plugin_shoubanhua
+<<<<<<< HEAD
 desc: 支持第三方所有OpenAI绘图格式和原生Google Gemini 终极缝合怪，文生图/图生图插件，支持LLM智能判断
 help: |
   🎨 手办化插件
@@ -15,3 +16,23 @@ help: |
 version: v2.8.9
 author: shskjw
 repo: https://github.com/shskjw/astrbot_plugin_shoubanhua
+=======
+desc: 支持第三方OpenAI绘图格式的文生图/图生图插件，支持多源API配置（含模型）和LLM智能判断
+help: |
+  🎨 手办化插件
+
+  核心功能：
+  - 文生图、图生图生成
+  - LLM智能判断：自动识别文生图/图生图
+  - 上下文感知：获取聊天记录辅助判断
+  - 多源API配置：每个信息源独立配置 URL、Key 和模型，跨源切换
+
+  管理命令：
+  - #手办化切换源 <序号> - 切换当前使用的API信息源（含模型）
+  - #手办化查看源 - 查看所有信息源、Key和模型
+  - #上下文状态 - 查看上下文状态
+  - #清除上下文 - 清除当前会话上下文
+version: v3.0.1
+author: shskjw
+repo: https://github.com/Qiscard/astrbot_plugin_shoubanhua
+>>>>>>> 644277e (1)
