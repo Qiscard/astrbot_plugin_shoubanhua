@@ -101,13 +101,15 @@ class ApiManager:
             return None
         return proxy
 
-    async def get_source(self) -> Tuple[str, str, str, bool, bool] | None:
-        """获取当前激活的图片信息源的 (base_url, key, model, prefer_images_api, force_images_api) 元组。
+    async def get_source(self) -> Tuple[str, str, str, bool, bool, Optional[Dict]] | None:
+        """获取当前激活的图片信息源的 (base_url, key, model, prefer_images_api, force_images_api, source_entry) 元组。
 
         自动跳过视频源（有 video_model 的条目），只在图片源中选择。
+        source_entry 为该源的原始配置字典，供需要额外字段（如落心秋API 的 size/quality）的协议使用；
+        旧版 generic_api_url 配置下为 None。
 
         Returns:
-            (base_url, key, model, prefer_images_api, force_images_api) 或 None
+            (base_url, key, model, prefer_images_api, force_images_api, source_entry) 或 None
         """
         async with self.key_lock:
             all_sources = self.config.get("generic_sources", [])
@@ -135,7 +137,7 @@ class ApiManager:
                 if keys:
                     k = keys[self.generic_idx % len(keys)]
                     self.generic_idx += 1
-                    return url, k, src_model, prefer_images, force_images
+                    return url, k, src_model, prefer_images, force_images, src
 
                 return None
 
@@ -144,7 +146,7 @@ class ApiManager:
             if url and keys:
                 k = keys[self.generic_idx % len(keys)]
                 self.generic_idx += 1
-                return url, k, self.config.get("model", "nano-banana"), self.config.get("generic_prefer_images_api", False), False
+                return url, k, self.config.get("model", "nano-banana"), self.config.get("generic_prefer_images_api", False), False, None
 
             return None
 
@@ -668,6 +670,108 @@ class ApiManager:
             err_msg = str(e) or type(e).__name__
             return f"系统错误: {err_msg}"
 
+    async def _call_luoxinqiu_api(self, images: List[bytes], prompt: str,
+                                  key: str, base_url: str,
+                                  source_entry: Optional[Dict] = None,
+                                  proxy: str = None) -> bytes | str:
+        """调用落心秋API（GET 查询参数协议）。
+
+        该接口以 prompt/size/quality/url/apikey 作为查询参数，成功时返回图片二进制或
+        含图片地址的 JSON/文本。由于接口的图像编辑参数只接受可访问的图片链接，
+        而插件持有的是图片二进制数据，本协议只支持文生图；传入图片时直接返回明确提示，
+        避免把无法访问的数据静默发给服务端。
+
+        Args:
+            images: 输入图片列表（本协议不支持，非空时返回提示）
+            prompt: 生成提示词
+            key: apikey
+            base_url: 完整接口地址
+            source_entry: 信息源原始配置，用于读取 size/quality
+            proxy: 代理地址
+
+        Returns:
+            生成的图片字节；失败时返回错误说明字符串
+        """
+        if images:
+            return (
+                "落心秋API 仅支持文生图：该接口的图像编辑参数只接受图片链接，"
+                "无法直接上传图片数据。请改用其他信息源处理图片。"
+            )
+
+        source_entry = source_entry or {}
+        size = str(source_entry.get("size", "") or "").strip()
+        quality = str(source_entry.get("quality", "") or "").strip()
+
+        res_set = self.config.get("image_resolution", "1K")
+        final_prompt = f"(Masterpiece, Best Quality, {res_set} Resolution), {prompt}" if res_set != "1K" else prompt
+
+        params = {"prompt": final_prompt, "apikey": key}
+        if size:
+            params["size"] = size
+        if quality:
+            params["quality"] = quality
+
+        timeout_val = self.config.get("timeout", 120)
+        timeout = aiohttp.ClientTimeout(total=timeout_val)
+        session = await self._get_session()
+        current_proxy = self._get_request_proxy(base_url, proxy)
+
+        try:
+            async with session.get(base_url, params=params, proxy=current_proxy, timeout=timeout) as resp:
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                raw = await resp.read()
+
+                if resp.status != 200:
+                    err_msg = self._extract_api_error_message(raw.decode("utf-8", errors="ignore"))
+                    return f"落心秋API Error {resp.status}: {err_msg[:300]}"
+
+                # 服务端直接返回图片二进制（部分站点 Content-Type 不准确，按文件头兜底判断）
+                if content_type.startswith("image/") or (
+                    raw[:8] == b"\x89PNG\r\n\x1a\n"
+                    or raw[:3] == b"\xff\xd8\xff"
+                    or raw[:6] in (b"GIF87a", b"GIF89a")
+                    or (raw[:4] == b"RIFF" and raw[8:12] == b"WEBP")
+                ):
+                    return raw
+
+                text = raw.decode("utf-8", errors="ignore")
+
+                if "<html" in text.lower():
+                    return "HTTP 200: 服务端返回了网页而非图片接口数据"
+
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    data = None
+
+                if isinstance(data, dict):
+                    if "error" in data:
+                        return self._extract_api_error_message(text)
+                    img_url = self.extract_image_url(data)
+                    if img_url:
+                        if img_url.startswith("data:"):
+                            return base64.b64decode(img_url.split(",")[-1])
+                        return await self._download_result_image(img_url, proxy, base_url)
+
+                # 纯文本返回：可能是图片地址或 base64
+                img_url = self._extract_url_from_text(text)
+                if img_url:
+                    return await self._download_result_image(img_url, proxy, base_url)
+
+                b64_data = self._extract_base64_from_text(text)
+                if b64_data:
+                    return base64.b64decode(b64_data)
+
+                return f"落心秋API 返回成功但未找到图片数据。Raw: {text[:200]}..."
+
+        except asyncio.TimeoutError:
+            return f"请求超时 ({timeout_val}s)，请稍后再试或检查网络。"
+        except Exception as e:
+            import traceback
+            logger.error(f"落心秋 API Call Error: {traceback.format_exc()}")
+            err_msg = str(e) or type(e).__name__
+            return f"系统错误: {err_msg}"
+
     def _is_chat_not_supported_error(self, error_msg: str) -> bool:
         """检查是否是 chat completions 不支持的错误"""
         error_lower = error_msg.lower()
@@ -905,7 +1009,19 @@ class ApiManager:
         source = await self.get_source()
         if not source:
             return "API URL 或 Key 未配置"
-        base_url, key, source_model, source_prefer_images, source_force_images = source
+        base_url, key, source_model, source_prefer_images, source_force_images, source_entry = source
+
+        # 1.0 落心秋API 使用独立的 GET 查询参数协议，直接分流
+        if str((source_entry or {}).get("__template_key", "")).strip() == "luoxinqiu":
+            logger.info("已选用落心秋API 模板，走 GET 查询参数协议")
+            self._last_metrics["model"] = str((source_entry or {}).get("alias", "")).strip() or "落心秋API"
+            result = await self._call_luoxinqiu_api(
+                images, prompt, key, base_url, source_entry, proxy
+            )
+            elapsed = asyncio.get_running_loop().time() - call_start
+            self._last_metrics["upstream_duration"] = elapsed
+            self._last_metrics["total_duration"] = elapsed
+            return result
 
         # 1.1 如果调用方未指定模型，使用信息源配置的模型
         if not model:

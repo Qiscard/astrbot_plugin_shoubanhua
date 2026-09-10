@@ -3104,8 +3104,15 @@ class FigurineProPlugin(Star):
             lines.append("🖼️ 图片源:")
             for i, src in enumerate(image_sources):
                 alias = str(src.get("alias", "")).strip()
-                src_model = src.get("model", "未设置")
-                lines.append(f"  📡 {name}{marker} | 模型: {src_model}")
+                marker = " ⬅️ 当前" if (i + 1) == active_img_idx else ""
+                name = alias if alias else f"图片源{i + 1}"
+                if str(src.get("__template_key", "")).strip() == "luoxinqiu":
+                    size = str(src.get("size", "") or "").strip() or "默认"
+                    quality = str(src.get("quality", "") or "").strip() or "默认"
+                    detail = f"比例: {size} | 质量: {quality}"
+                else:
+                    detail = f"模型: {src.get('model', '未设置')}"
+                lines.append(f"  📡 {name}{marker} | {detail}")
 
         # 视频源
         if video_sources:

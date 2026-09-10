@@ -51,6 +51,47 @@
                     }
                 }
             },
+            "luoxinqiu": {
+                "name": "落心秋API",
+                "display_item": "alias",
+                "hint": "GET 查询参数协议，仅支持文生图（该接口只接受图片链接，无法直接上传图片数据）",
+                "items": {
+                    "alias": {
+                        "description": "别称",
+                        "type": "string",
+                        "hint": "信息源的自定义名称，用于指令中显示和区分。",
+                        "default": "落心秋"
+                    },
+                    "url": {
+                        "description": "接口地址",
+                        "type": "string",
+                        "hint": "需填写完整接口地址，如 https://missqiu.icu/API/gptimage2.php 。",
+                        "default": "https://missqiu.icu/API/gptimage2.php"
+                    },
+                    "keys": {
+                        "description": "apikey 池",
+                        "type": "list",
+                        "hint": "该服务商对应的 apikey 轮询池，多个 apikey 将自动轮询切换。",
+                        "items": {
+                            "type": "string",
+                            "description": "你的apikey"
+                        },
+                        "default": []
+                    },
+                    "size": {
+                        "description": "图像比例",
+                        "type": "string",
+                        "hint": "图像比例，如 1:1、9:16 。留空则不发送该参数，由服务端决定。",
+                        "default": "1:1"
+                    },
+                    "quality": {
+                        "description": "图像质量",
+                        "type": "string",
+                        "hint": "图像质量，如 high 。留空则不发送该参数，由服务端决定。",
+                        "default": "high"
+                    }
+                }
+            },
             "grok_video": {
                 "name": "Grok 视频源",
                 "display_item": "alias",
