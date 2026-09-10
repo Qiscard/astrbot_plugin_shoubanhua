@@ -1,11 +1,9 @@
 import json
 import asyncio
-import random
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 from astrbot import logger
-from .utils import norm_id
 
 
 class DataManager:
@@ -13,10 +11,6 @@ class DataManager:
         self.data_dir = Path(data_dir)
         self.config = config
 
-        self.user_counts_file = self.data_dir / "user_counts.json"
-        self.group_counts_file = self.data_dir / "group_counts.json"
-        self.user_checkin_file = self.data_dir / "user_checkin.json"
-        self.daily_stats_file = self.data_dir / "daily_stats.json"
         self.preset_images_file = self.data_dir / "preset_images.json"
         self.user_prompts_file = self.data_dir / "user_prompts.json"
         self.preset_ref_images_file = self.data_dir / "preset_ref_images.json"  # 预设参考图索引
@@ -37,26 +31,14 @@ class DataManager:
         if not self.fonts_dir.exists():
             self.fonts_dir.mkdir(parents=True, exist_ok=True)
 
-        self.user_counts: Dict[str, int] = {}
-        self.group_counts: Dict[str, int] = {}
-        self.user_checkin_data: Dict[str, str] = {}
-        self.daily_stats: Dict[str, Any] = {}
         self.preset_images: Dict[str, str] = {}
         self.user_prompts: Dict[str, str] = {}
         self.preset_ref_images: Dict[str, List[str]] = {}  # 预设参考图: {预设名: [图片文件名列表]}
         self.prompt_map: Dict[str, str] = {}
 
     async def initialize(self):
-        await self._load_json(self.user_counts_file, "user_counts")
-        await self._load_json(self.group_counts_file, "group_counts")
-        await self._load_json(self.user_checkin_file, "user_checkin_data")
         await self._load_json(self.user_prompts_file, "user_prompts")
         await self._load_json(self.preset_ref_images_file, "preset_ref_images")  # 加载预设参考图索引
-
-        if not self.daily_stats_file.exists():
-            self.daily_stats = {"date": "", "users": {}, "groups": {}}
-        else:
-            await self._load_json(self.daily_stats_file, "daily_stats")
 
         await self._load_json(self.preset_images_file, "preset_images")
         self.reload_prompts()
@@ -129,65 +111,6 @@ class DataManager:
         await self._save_json(self.user_prompts_file, self.user_prompts)
         self.reload_prompts()
         return True
-
-    # --- 积分相关 ---
-    def get_user_count(self, uid: str) -> int:
-        return self.user_counts.get(norm_id(uid), 0)
-
-    async def decrease_user_count(self, uid: str, amount: int = 1):
-        uid = norm_id(uid)
-        count = self.get_user_count(uid)
-        if amount <= 0 or count <= 0: return
-        self.user_counts[uid] = count - min(amount, count)
-        await self._save_json(self.user_counts_file, self.user_counts)
-
-    async def add_user_count(self, uid: str, amount: int):
-        uid = norm_id(uid)
-        self.user_counts[uid] = self.get_user_count(uid) + amount
-        await self._save_json(self.user_counts_file, self.user_counts)
-
-    def get_group_count(self, gid: str) -> int:
-        return self.group_counts.get(norm_id(gid), 0)
-
-    async def decrease_group_count(self, gid: str, amount: int = 1):
-        gid = norm_id(gid)
-        count = self.get_group_count(gid)
-        if amount <= 0 or count <= 0: return
-        self.group_counts[gid] = count - min(amount, count)
-        await self._save_json(self.group_counts_file, self.group_counts)
-
-    async def add_group_count(self, gid: str, amount: int):
-        gid = norm_id(gid)
-        self.group_counts[gid] = self.get_group_count(gid) + amount
-        await self._save_json(self.group_counts_file, self.group_counts)
-
-    async def process_checkin(self, uid: str) -> str:
-        uid = norm_id(uid)
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self.user_checkin_data.get(uid) == today:
-            return f"已签到。剩余: {self.get_user_count(uid)}"
-
-        reward = int(self.config.get("checkin_fixed_reward", 3))
-        if self.config.get("enable_random_checkin", False):
-            max_r = int(self.config.get("checkin_random_reward_max", 5))
-            reward = random.randint(1, max(1, max_r))
-
-        await self.add_user_count(uid, reward)
-        self.user_checkin_data[uid] = today
-        await self._save_json(self.user_checkin_file, self.user_checkin_data)
-        return f"🎉 签到成功 +{reward}次。"
-
-    async def record_usage(self, uid: str, gid: Optional[str]):
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self.daily_stats.get("date") != today:
-            self.daily_stats = {"date": today, "users": {}, "groups": {}}
-
-        uid = norm_id(uid)
-        self.daily_stats["users"][uid] = self.daily_stats["users"].get(uid, 0) + 1
-        if gid:
-            gid = norm_id(gid)
-            self.daily_stats["groups"][gid] = self.daily_stats["groups"].get(gid, 0) + 1
-        await self._save_json(self.daily_stats_file, self.daily_stats)
 
     # --- 预设图片管理 ---
     async def save_preset_image(self, preset_key: str, image_bytes: bytes):

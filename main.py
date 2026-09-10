@@ -12,7 +12,7 @@ from astrbot import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import Image, Plain, Node, Nodes, At, Reply, Video
+from astrbot.core.message.components import Image, Plain, Node, Nodes, Reply, Video
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 # 导入模块
@@ -853,15 +853,6 @@ class FigurineProPlugin(Star):
                 return final_prompt, key, extra_rules
 
         return prompt, "自定义", ""
-
-    def _get_quota_str(self, deduction: dict, uid: str, gid: Optional[str] = None) -> str:
-        user_count = self.data_mgr.get_user_count(uid)
-        group_count = self.data_mgr.get_group_count(norm_id(gid)) if gid else 0
-
-        if deduction["source"] == "free":
-            return f"用户: ∞ | 群组: {group_count}"
-
-        return f"用户: {user_count} | 群组: {group_count}"
 
     def _get_generation_count_limit(self, task_type: str = "generic") -> int:
         """获取不同任务类型的数量上限"""
@@ -1909,7 +1900,7 @@ class FigurineProPlugin(Star):
         }
         if str(masked).strip() in low_level_failures:
             masked = default_msg
-        masked = str(masked).removeprefix("").strip()
+        masked = str(masked).removeprefix("❌").strip()
         # 给 LLM 多种自然表达失败的参考，不要让它照搬机械话术
         fail_styles = random.choice([
             "刚才有点小状况，稍后我再试一次。",
@@ -2084,72 +2075,6 @@ class FigurineProPlugin(Star):
 
         return False, "现在还没有图可以打包哦，先发点图或者让我帮你弄几张，然后再来打包~"
 
-    async def _check_quota(self, event, uid, gid, cost) -> dict:
-        res = {"allowed": False, "source": None, "msg": ""}
-
-        # 1. 检查用户是否被黑名单
-        if uid in (self.conf.get("user_blacklist") or []):
-            res["msg"] = "这个功能你暂时用不了哦~"
-            return res
-        if gid and gid in (self.conf.get("group_blacklist") or []):
-            res["msg"] = "这个群暂时用不了这个功能~"
-            return res
-
-        # 2. 管理员始终允许
-        if self.is_admin(event):
-            res["allowed"] = True
-            res["source"] = "free"
-            return res
-
-        # 3. 检查用户白名单（如果配置了白名单，则只有白名单用户允许）
-        user_whitelist = self.conf.get("user_whitelist") or []
-        if user_whitelist and uid not in user_whitelist:
-            res["msg"] = "你还没有使用权限，联系管理员开通一下吧~"
-            return res
-
-        # 4. 如果在用户白名单中，允许使用
-        if user_whitelist and uid in user_whitelist:
-            res["allowed"] = True
-            res["source"] = "free"
-            return res
-
-        # 5. 检查群聊白名单（如果配置了群白名单，则只有白名单群允许）
-        group_whitelist = self.conf.get("group_whitelist") or []
-        if group_whitelist and gid and gid not in group_whitelist:
-            res["msg"] = "这个群还没有使用权限，联系管理员开通一下吧~"
-            return res
-
-        # 6. 如果在群聊白名单中，允许使用
-        if group_whitelist and gid and gid in group_whitelist:
-            res["allowed"] = True
-            res["source"] = "free"
-            return res
-
-        # 7. 检查次数限制
-        enable_u = self.conf.get("enable_user_limit", True)
-        enable_g = self.conf.get("enable_group_limit", False)
-        if not enable_u and not enable_g:
-            res["allowed"] = True;
-            res["source"] = "free";
-            return res
-
-        u_bal = self.data_mgr.get_user_count(uid)
-        if enable_u and u_bal >= cost:
-            res["allowed"] = True;
-            res["source"] = "user";
-            return res
-        if gid and enable_g:
-            g_bal = self.data_mgr.get_group_count(gid)
-            if g_bal >= cost:
-                res["allowed"] = True;
-                res["source"] = "group";
-                return res
-        else:
-            g_bal = 0
-
-        res["msg"] = f"次数不太够了（需要{cost}次，你还剩{u_bal}次，群里还剩{g_bal}次），联系管理员补充一下吧~"
-        return res
-
     async def _load_preset_ref_images(self, preset_name: str) -> List[bytes]:
         """加载预设的参考图"""
         if not self.data_mgr.has_preset_ref_images(preset_name):
@@ -2159,26 +2084,22 @@ class FigurineProPlugin(Star):
     # ================= 核心：后台生成逻辑封装 =================
 
     async def _run_background_task(self, event: AstrMessageEvent, images: List[bytes],
-                                   prompt: str, preset_name: str, deduction: dict, uid: str, gid: str, cost: int,
+                                   prompt: str, preset_name: str,
                                    extra_rules: str = "", model_override: str = "", hide_text: bool = False,
-                                   charge_quota: bool = True,
                                    suppress_user_error: bool = False) -> Tuple[bool, str]:
         """
         后台执行生成任务，并在完成后主动发送消息。
 
         Args:
+            images: 输入图片列表
+            prompt: 提示词
+            preset_name: 预设名
             extra_rules: 用户追加的规则（如"皮肤白一点"）
             model_override: 指定使用的模型（如果为空则使用默认模型）
             hide_text: 是否隐藏生成成功提示文字
+            suppress_user_error: 是否抑制面向用户的错误详情
         """
         try:
-            # 1. 扣费
-            if charge_quota:
-                if deduction["source"] == "user":
-                    await self.data_mgr.decrease_user_count(uid, cost)
-                elif deduction["source"] == "group":
-                    await self.data_mgr.decrease_group_count(gid, cost)
-
             # 2. 加载预设参考图（如果有）
             # 注意：人设功能（preset_name 以 "人设-" 开头）已经在调用前加载了参考图，不需要重复加载
             if preset_name != "自定义" and not preset_name.startswith("人设-") and self.conf.get(
@@ -2207,7 +2128,6 @@ class FigurineProPlugin(Star):
             if isinstance(res, bytes):
                 res = await self._prepare_send_image_bytes(res)
                 elapsed = (datetime.now() - start_time).total_seconds()
-                await self.data_mgr.record_usage(uid, gid)
                 await self._register_generation_success(event.unified_msg_origin, 1)
                 await self._register_generated_image(event.unified_msg_origin, res)
 
@@ -2218,13 +2138,11 @@ class FigurineProPlugin(Star):
                 # 6. 主动发送结果
                 chain_nodes = [Image.fromBytes(res)]
                 if not hide_text:
-                    quota_str = self._get_quota_str(deduction, uid, gid)
                     # 构建成功文案
                     timing_text = self._format_success_timing(elapsed)
-                    info_text = f"\n 生成成功 ({timing_text}) | 预设: {preset_name}"
+                    info_text = f"\n✅ 生成成功 ({timing_text}) | 预设: {preset_name}"
                     if extra_rules:
                         info_text += f" | 规则: {extra_rules[:20]}{'...' if len(extra_rules) > 20 else ''}"
-                    info_text += f" | 剩余: {quota_str}"
                     if self.conf.get("show_model_info", False):
                         info_text += f" | {model}"
                     chain_nodes.append(Plain(info_text))
@@ -2240,28 +2158,28 @@ class FigurineProPlugin(Star):
                     res)
                 if (not suppress_user_error) or self._should_show_debug_errors():
                     display_msg = error_msg
-                    if not str(display_msg).startswith(""):
+                    if not str(display_msg).startswith("❌"):
                         display_msg = f"没搞好: {display_msg}"
                     else:
-                        display_msg = str(display_msg).removeprefix("").strip()
+                        display_msg = str(display_msg).removeprefix("❌").strip()
                     await event.send(event.chain_result([Plain(display_msg)]))
-                return False, str(error_msg).removeprefix("").strip()
+                return False, str(error_msg).removeprefix("❌").strip()
 
         except Exception as e:
             logger.error(f"Background task error: {e}")
             error_msg = self._resolve_debug_error_message(e,
                                                           "这次没弄好，请稍后再试。") if suppress_user_error else f"系统错误: {e}"
             if (not suppress_user_error) or self._should_show_debug_errors():
-                _display = str(error_msg).removeprefix("").strip()
+                _display = str(error_msg).removeprefix("❌").strip()
                 await event.send(event.chain_result([Plain(f"出了点状况: {_display}")]))
-            return False, str(error_msg).removeprefix("").strip()
+            return False, str(error_msg).removeprefix("❌").strip()
         finally:
             await self._complete_pending_generation(event.unified_msg_origin, 1)
 
     # ================= 批量文生图功能 =================
 
     async def _run_batch_text_to_image(self, event: AstrMessageEvent, prompt: str, preset_name: str,
-                                       deduction: dict, uid: str, gid: str, count: int,
+                                       count: int,
                                        extra_rules: str = "", hide_text: bool = False,
                                        suppress_user_error: bool = False) -> Dict[str, Any]:
         """
@@ -2271,21 +2189,12 @@ class FigurineProPlugin(Star):
             event: 消息事件
             prompt: 提示词
             preset_name: 预设名
-            deduction: 扣费信息
-            uid: 用户ID
-            gid: 群组ID
             count: 生成数量
             extra_rules: 追加规则
             hide_text: 是否隐藏提示文字
+            suppress_user_error: 是否抑制面向用户的错误详情
         """
         try:
-            # 1. 统一扣费
-            total_cost = count
-            if deduction["source"] == "user":
-                await self.data_mgr.decrease_user_count(uid, total_cost)
-            elif deduction["source"] == "group":
-                await self.data_mgr.decrease_group_count(gid, total_cost)
-
             # 2. 加载预设参考图（如果有）
             images = []
             if preset_name != "自定义" and self.conf.get("enable_preset_ref_images", True):
@@ -2320,7 +2229,6 @@ class FigurineProPlugin(Star):
                             if isinstance(res, bytes):
                                 res = await self._prepare_send_image_bytes(res)
                                 elapsed = (datetime.now() - start_time).total_seconds()
-                                await self.data_mgr.record_usage(uid, gid)
                                 await self._register_generation_success(event.unified_msg_origin, 1)
                                 await self._register_generated_image(event.unified_msg_origin, res)
 
@@ -2332,7 +2240,7 @@ class FigurineProPlugin(Star):
                                 chain_nodes = [Image.fromBytes(res)]
                                 if not hide_text:
                                     timing_text = self._format_success_timing(elapsed)
-                                    info_text = f"\n [{index}/{count}] 生成成功 ({timing_text}) | 预设: {preset_name}"
+                                    info_text = f"\n✅ [{index}/{count}] 生成成功 ({timing_text}) | 预设: {preset_name}"
                                     if extra_rules:
                                         info_text += f" | 规则: {extra_rules[:15]}..."
                                     chain_nodes.append(Plain(info_text))
@@ -2347,7 +2255,7 @@ class FigurineProPlugin(Star):
                             if retry_count <= max_retries:
                                 if (not suppress_user_error) or self._should_show_debug_errors():
                                     await event.send(event.chain_result([
-                                        Plain(f" 第 {index}/{count} 张生成失败 ({error_msg})\n 正在重试...")
+                                        Plain(f"⚠️ 第 {index}/{count} 张生成失败 ({error_msg})\n⏳ 正在重试...")
                                     ]))
                                 await asyncio.sleep(1.5)
 
@@ -2383,8 +2291,7 @@ class FigurineProPlugin(Star):
 
             # 5. 发送完成汇总
             if not hide_text:
-                quota_str = self._get_quota_str(deduction, uid, gid)
-                summary = f"\n 批量生成完成: 成功 {results['success']}/{count} 张 | 剩余: {quota_str}"
+                summary = f"\n📊 批量生成完成: 成功 {results['success']}/{count} 张"
                 await event.send(event.chain_result([Plain(summary)]))
             return results
 
@@ -2398,10 +2305,9 @@ class FigurineProPlugin(Star):
     # ================= 批量图生图功能（同一张图片生成多个版本） =================
 
     async def _run_batch_image_to_image(self, event: AstrMessageEvent, images: List[bytes],
-                                        prompt: str, preset_name: str, deduction: dict,
-                                        uid: str, gid: str, count: int,
+                                        prompt: str, preset_name: str,
+                                        count: int,
                                         extra_rules: str = "", hide_text: bool = False,
-                                        charge_quota: bool = True,
                                         suppress_user_error: bool = False) -> Dict[str, Any]:
         """
         批量图生图后台任务 - 对同一张图片生成多个不同版本
@@ -2411,22 +2317,12 @@ class FigurineProPlugin(Star):
             images: 输入图片列表
             prompt: 提示词
             preset_name: 预设名
-            deduction: 扣费信息
-            uid: 用户ID
-            gid: 群组ID
             count: 生成数量
             extra_rules: 追加规则
             hide_text: 是否隐藏提示文字
+            suppress_user_error: 是否抑制面向用户的错误详情
         """
         try:
-            # 1. 统一扣费
-            total_cost = count
-            if charge_quota:
-                if deduction["source"] == "user":
-                    await self.data_mgr.decrease_user_count(uid, total_cost)
-                elif deduction["source"] == "group":
-                    await self.data_mgr.decrease_group_count(gid, total_cost)
-
             # 2. 加载预设参考图（如果有）
             if preset_name != "自定义" and preset_name != "编辑" and self.conf.get("enable_preset_ref_images", True):
                 ref_images = await self._load_preset_ref_images(preset_name)
@@ -2460,7 +2356,6 @@ class FigurineProPlugin(Star):
                             if isinstance(res, bytes):
                                 res = await self._prepare_send_image_bytes(res)
                                 elapsed = (datetime.now() - start_time).total_seconds()
-                                await self.data_mgr.record_usage(uid, gid)
                                 await self._register_generation_success(event.unified_msg_origin, 1)
                                 await self._register_generated_image(event.unified_msg_origin, res)
 
@@ -2472,7 +2367,7 @@ class FigurineProPlugin(Star):
                                 chain_nodes = [Image.fromBytes(res)]
                                 if not hide_text:
                                     timing_text = self._format_success_timing(elapsed)
-                                    info_text = f"\n [{index}/{count}] 版本生成成功 ({timing_text}) | 预设: {preset_name}"
+                                    info_text = f"\n✅ [{index}/{count}] 版本生成成功 ({timing_text}) | 预设: {preset_name}"
                                     if extra_rules:
                                         info_text += f" | 规则: {extra_rules[:15]}..."
                                     chain_nodes.append(Plain(info_text))
@@ -2487,7 +2382,7 @@ class FigurineProPlugin(Star):
                             if retry_count <= max_retries:
                                 if (not suppress_user_error) or self._should_show_debug_errors():
                                     await event.send(event.chain_result([
-                                        Plain(f" 第 {index}/{count} 个版本生成失败 ({error_msg})\n 正在重试...")
+                                        Plain(f"⚠️ 第 {index}/{count} 个版本生成失败 ({error_msg})\n⏳ 正在重试...")
                                     ]))
                                 await asyncio.sleep(1.5)
 
@@ -2522,8 +2417,7 @@ class FigurineProPlugin(Star):
 
             # 5. 发送完成汇总
             if not hide_text:
-                quota_str = self._get_quota_str(deduction, uid, gid)
-                summary = f"\n 多版本生成完成: 成功 {results['success']}/{count} 张 | 剩余: {quota_str}"
+                summary = f"\n📊 多版本生成完成: 成功 {results['success']}/{count} 张"
                 await event.send(event.chain_result([Plain(summary)]))
             return results
 
@@ -2603,17 +2497,6 @@ class FigurineProPlugin(Star):
             )
             await event.send(event.chain_result([Plain(feedback)]))
 
-        # 3. 检查配额（批量生成需要足够的次数）
-        gid = norm_id(event.get_group_id())
-        total_cost = count
-        deduction = await self._check_quota(event, uid, gid, total_cost)
-        if not deduction["allowed"]:
-            return self._finalize_llm_tool_result(
-                "[TOOL_FAILED] 用户次数不足，无法完成。"
-                "请用你自己平时的语气告诉用户现在搞不了，"
-                "别提'次数''配额''限制'等词汇，随口带过就好，可以让TA联系管理员或等等再来。"
-            )
-
         # 4. 更新图片生成冷却时间
         self._update_image_cooldown(uid)
 
@@ -2624,7 +2507,7 @@ class FigurineProPlugin(Star):
         await self._register_pending_generation(event.unified_msg_origin, count)
         if count == 1:
             success, error_msg = await self._run_background_task(
-                event, [], final_prompt, preset_name, deduction, uid, gid, total_cost,
+                event, [], final_prompt, preset_name,
                 extra_rules,
                 model_override="", hide_text=hide_llm_result_text,
                 suppress_user_error=True
@@ -2634,7 +2517,7 @@ class FigurineProPlugin(Star):
             branch_errors = [error_msg] if error_msg else []
         else:
             batch_result = await self._run_batch_text_to_image(
-                event, final_prompt, preset_name, deduction, uid, gid, count, extra_rules,
+                event, final_prompt, preset_name, count, extra_rules,
                 hide_llm_result_text, suppress_user_error=True
             )
             total_success = int(batch_result.get("success", 0))
@@ -2757,19 +2640,10 @@ class FigurineProPlugin(Star):
         count_request_text = f"{prompt} {extra_rules}".strip() if extra_rules else prompt
         raw_count = self._resolve_tool_requested_count(count_request_text, incoming_count=count, default=1, multi_default=3)
         count, count_limited = self._normalize_generation_count(raw_count, "edit")
-        gid = norm_id(event.get_group_id())
 
         # ==== 分支：分别批量处理多张图片 ====
         if len(images) > 1 and not merge_multiple_images:
             total_images = len(images)
-            total_cost = total_images * count
-            deduction = await self._check_quota(event, uid, gid, total_cost)
-            if not deduction["allowed"]:
-                return self._finalize_llm_tool_result(
-                    "[TOOL_FAILED] 用户次数不足，无法完成。"
-                    "请用你自己平时的语气告诉用户现在搞不了，"
-                    "别提'次数''配额''限制'等词汇，随口带过就好，可以让TA联系管理员或等等再来。"
-                )
 
             self._update_image_cooldown(uid)
 
@@ -2789,14 +2663,14 @@ class FigurineProPlugin(Star):
                 async with semaphore:
                     if count == 1:
                         return await self._run_background_task(
-                            event, [img], final_prompt, preset_name, deduction, uid, gid, count,
-                            extra_rules, hide_text=hide_llm_result_text, charge_quota=False,
+                            event, [img], final_prompt, preset_name,
+                            extra_rules, hide_text=hide_llm_result_text,
                             suppress_user_error=True
                         )
                     else:
                         return await self._run_batch_image_to_image(
-                            event, [img], final_prompt, preset_name, deduction, uid, gid,
-                            count, extra_rules, hide_llm_result_text, charge_quota=False,
+                            event, [img], final_prompt, preset_name,
+                            count, extra_rules, hide_llm_result_text,
                             suppress_user_error=True
                         )
 
@@ -2826,15 +2700,6 @@ class FigurineProPlugin(Star):
                 f"[TOOL_SUCCESS] {total_images}张图都弄好发出去了。用你自己的语气随口带过，也可以什么都不说。")
 
         # ==== 分支：普通单次处理（单图或合并多图） ====
-        total_cost = count
-        deduction = await self._check_quota(event, uid, gid, total_cost)
-        if not deduction["allowed"]:
-            return self._finalize_llm_tool_result(
-                "[TOOL_FAILED] 用户次数不足，无法完成。"
-                "请用你自己平时的语气告诉用户现在搞不了，"
-                "别提'次数''配额''限制'等词汇，随口带过就好，可以让TA联系管理员或等等再来。"
-            )
-
         # 2. 根据配置决定是否发送进度提示
         if show_llm_progress:
             feedback = self._build_llm_progress_text(
@@ -2852,7 +2717,7 @@ class FigurineProPlugin(Star):
         await self._register_pending_generation(event.unified_msg_origin, count)
         if count == 1:
             success, error_msg = await self._run_background_task(
-                event, images, final_prompt, preset_name, deduction, uid, gid, total_cost,
+                event, images, final_prompt, preset_name,
                 extra_rules, hide_text=hide_llm_result_text, suppress_user_error=True
             )
             total_success = 1 if success else 0
@@ -2860,7 +2725,7 @@ class FigurineProPlugin(Star):
             branch_errors = [error_msg] if error_msg else []
         else:
             batch_result = await self._run_batch_image_to_image(
-                event, images, final_prompt, preset_name, deduction, uid, gid, count,
+                event, images, final_prompt, preset_name, count,
                 extra_rules, hide_llm_result_text, suppress_user_error=True
             )
             total_success = int(batch_result.get("success", 0))
@@ -2930,23 +2795,13 @@ class FigurineProPlugin(Star):
 
             user_prompt = self._append_preset_safety_suffix(user_prompt, preset_name)
 
-        uid = norm_id(event.get_sender_id())
-        gid = norm_id(event.get_group_id())
-        cost = 1
-
-        deduction = await self._check_quota(event, uid, gid, cost)
-        if deduction["allowed"] is False:
-            yield event.chain_result([Plain(deduction["msg"])])
-            event.stop_event()
-            return
-
         # 立即阻止事件继续传递，防止重复触发
         event.stop_event()
 
         # 指令模式：先启动本处理流程，再发提示，避免被 after_message_sent 类插件截断后半段逻辑。
         _internal = {"自定义", "编辑", "edit", "custom"}
         preset_display = "" if (not preset_name or preset_name.strip().lower() in _internal) else preset_name
-        template = self.conf.get("generating_msg_template", " 收到请求，正在生成 [{preset}]...")
+        template = self.conf.get("generating_msg_template", "🎨 收到请求，正在生成 [{preset}]...")
         feedback = template.replace("{preset}", preset_display) if preset_display else template.replace(" [{preset}]",
                                                                                                         "").replace(
             "[{preset}]", "")
@@ -2993,11 +2848,6 @@ class FigurineProPlugin(Star):
             return
 
         # 判断是否为纯文生图模式（bnn 指令且没有图片）
-        if deduction["source"] == "user":
-            await self.data_mgr.decrease_user_count(uid, cost)
-        elif deduction["source"] == "group":
-            await self.data_mgr.decrease_group_count(gid, cost)
-
         self._log_prompt_preview(
             f"command:{base_cmd if base_cmd else 'bnn'}",
             user_prompt
@@ -3011,14 +2861,12 @@ class FigurineProPlugin(Star):
         if isinstance(res, bytes):
             res = await self._prepare_send_image_bytes(res)
             elapsed = (datetime.now() - start).total_seconds()
-            await self.data_mgr.record_usage(uid, gid)
             await self._register_generation_success(event.unified_msg_origin, 1)
             await self._register_generated_image(event.unified_msg_origin, res)
             if not is_bnn: await self.data_mgr.save_preset_image(base_cmd, res)
 
-            quota_str = self._get_quota_str(deduction, uid, gid)
             timing_text = self._format_success_timing(elapsed)
-            info = f"\n 生成成功 ({timing_text}) | 预设: {preset_name} | 剩余: {quota_str}"
+            info = f"\n✅ 生成成功 ({timing_text}) | 预设: {preset_name}"
             if self.conf.get("show_model_info", False):
                 info += f" | 模型: {self.api_mgr.get_last_metrics().get('model', '默认')}"
 
@@ -3033,24 +2881,15 @@ class FigurineProPlugin(Star):
         prompt = raw.replace(cmd_name, "").strip()
         if not prompt: yield event.chain_result([Plain("请输入描述。")]); return
 
-        uid = norm_id(event.get_sender_id())
-        deduction = await self._check_quota(event, uid, event.get_group_id(), 1)
-        if not deduction["allowed"]: yield event.chain_result([Plain(deduction["msg"])]); return
-
         final_prompt, preset_name, extra_rules = self._process_prompt_and_preset(prompt)
 
         _internal2 = {"自定义", "编辑", "edit", "custom"}
         preset_display = "" if (not preset_name or preset_name.strip().lower() in _internal2) else preset_name
-        template = self.conf.get("generating_msg_template", " 收到请求，正在生成 [{preset}]...")
+        template = self.conf.get("generating_msg_template", "🎨 收到请求，正在生成 [{preset}]...")
         feedback = template.replace("{preset}", preset_display) if preset_display else template.replace(" [{preset}]",
                                                                                                         "").replace(
             "[{preset}]", "")
         await event.send(event.chain_result([Plain(feedback)]))
-
-        if deduction["source"] == "user":
-            await self.data_mgr.decrease_user_count(uid, 1)
-        elif deduction["source"] == "group":
-            await self.data_mgr.decrease_group_count(event.get_group_id(), 1)
 
         # 加载预设参考图
         images = []
@@ -3071,15 +2910,12 @@ class FigurineProPlugin(Star):
         if isinstance(res, bytes):
             res = await self._prepare_send_image_bytes(res)
             elapsed = (datetime.now() - start).total_seconds()
-            await self.data_mgr.record_usage(uid, norm_id(event.get_group_id()))
             await self._register_generation_success(event.unified_msg_origin, 1)
             await self._register_generated_image(event.unified_msg_origin, res)
-            quota_str = self._get_quota_str(deduction, uid, norm_id(event.get_group_id()))
             timing_text = self._format_success_timing(elapsed)
-            info = f"\n 生成成功 ({timing_text}) | 预设: {preset_name}"
+            info = f"\n✅ 生成成功 ({timing_text}) | 预设: {preset_name}"
             if extra_rules:
                 info += f" | 规则: {extra_rules[:15]}..."
-            info += f" | 剩余: {quota_str}"
             yield event.chain_result([Image.fromBytes(res), Plain(info)])
         else:
             yield event.chain_result([Plain(str(res))])
@@ -3090,7 +2926,7 @@ class FigurineProPlugin(Star):
         bot_id = self._get_bot_id(event) or "2854196310"
         return event.chain_result([Nodes(nodes=[Node(name="手办化助手", uin=bot_id, content=[Plain(txt)])])])
 
-    # 省略 Admin指令，它们和上一版完全一致，请确保不要覆盖掉下面的代码（lm列表, lm添加, 增加次数等）
+    # 省略 Admin指令，它们和上一版完全一致，请确保不要覆盖掉下面的代码（lm列表, lm添加, lm删除等）
 
     @filter.command("lm列表", aliases={"lmlist"}, prefix_optional=True)
     async def on_preset_list(self, event: AstrMessageEvent, ctx=None):
@@ -3127,7 +2963,7 @@ class FigurineProPlugin(Star):
         self.conf["prompt_list"] = prompt_list
         self._save_config(["prompt_list"])
 
-        yield event.chain_result([Plain(f" 已添加预设: {k}\n 已同步保存到配置文件")])
+        yield event.chain_result([Plain(f"✅ 已添加预设: {k}\n💾 已同步保存到配置文件")])
 
     @filter.command("lm删除", aliases={"lmd", "lm删", "删除预设"}, prefix_optional=True)
     async def on_delete_preset(self, event: AstrMessageEvent, ctx=None):
@@ -3142,7 +2978,7 @@ class FigurineProPlugin(Star):
         name = name.strip().lstrip(":：").strip()
 
         if not name:
-            yield event.chain_result([Plain("用法: lm删除 <预设名>\n例如: lm删除 手办化新版")])
+            yield event.chain_result([Plain("用法: #lm删除 <预设名>\n例如: #lm删除 手办化新版")])
             return
 
         prompt_list = self.conf.get("prompt_list", [])
@@ -3188,91 +3024,60 @@ class FigurineProPlugin(Star):
         if ref_count:
             details.append(f"{ref_count} 张参考图")
         detail_text = "\n已清理: " + "、".join(details) if details else ""
-        yield event.chain_result([Plain(f" 已删除预设: {name}{detail_text}")])
+        yield event.chain_result([Plain(f"✅ 已删除预设: {name}{detail_text}")])
 
     @filter.command("lm查看", aliases={"lmv", "lm预览"}, prefix_optional=True)
     async def on_view_preset(self, event: AstrMessageEvent, ctx=None):
         parts = event.message_str.split()
-        if len(parts) < 2: yield event.chain_result([Plain("用法: lm查看 <关键词>")]); return
+        if len(parts) < 2: yield event.chain_result([Plain("用法: #lm查看 <关键词>")]); return
         kw = parts[1].strip()
         prompt = self.data_mgr.get_prompt(kw)
         msg = f"🔍 [{kw}]:\n{prompt}" if prompt else f"没找到 [{kw}]"
         yield event.chain_result([Plain(msg)])
 
-    @filter.command("手办化签到", prefix_optional=True)
-    async def on_checkin(self, event: AstrMessageEvent, ctx=None):
-        if not self.conf.get("enable_checkin", False): yield event.chain_result([Plain("未开启签到")]); return
-        uid = norm_id(event.get_sender_id())
-        msg = await self.data_mgr.process_checkin(uid)
-        yield event.chain_result([Plain(msg)])
-
-    @filter.command("手办化查询次数", prefix_optional=True)
-    async def on_query_count(self, event: AstrMessageEvent, ctx=None):
-        uid = norm_id(event.get_sender_id())
-        if self.is_admin(event):
-            bot_id = self._get_bot_id(event)
-            for seg in event.message_obj.message:
-                if isinstance(seg, At):
-                    at_qq = str(seg.qq).strip()
-                    if bot_id and at_qq == str(bot_id).strip():
-                        continue
-                    uid = at_qq;
-                    break
-            # 也支持纯数字指定用户
-            parts = event.message_str.split()
-            for p in parts:
-                if p.isdigit() and len(p) >= 5:
-                    uid = p;
-                    break
-        u_cnt = self.data_mgr.get_user_count(uid)
-        msg = f" 用户 {uid} 剩余: {u_cnt}"
-        if gid := event.get_group_id():
-            msg += f"\n 本群剩余: {self.data_mgr.get_group_count(norm_id(gid))}"
-        yield event.chain_result([Plain(msg)])
-
     @filter.command("手办化切换源", prefix_optional=True)
     async def on_switch_source(self, event: AstrMessageEvent, ctx=None):
-        """手办化切换源 <序号> - 切换当前图片信息源"""
+        """#手办化切换源 <序号> - 切换当前图片信息源"""
         if not self.is_admin(event): return
         parts = event.message_str.split()
         if len(parts) < 2 or not parts[1].isdigit():
-            yield event.chain_result([Plain("用法: 手办化切换源 <序号>\n使用 手办化查看源 查看可用信息源")])
+            yield event.chain_result([Plain("用法: #手办化切换源 <序号>\n使用 #手办化查看源 查看可用信息源")])
             return
         idx = int(parts[1])
         image_sources = [s for s in self.conf.get("generic_sources", []) if not str(s.get("video_model", "")).strip()]
         if idx < 1 or idx > len(image_sources):
-            yield event.chain_result([Plain(f"序号无效，当前有 {len(image_sources)} 个图片源。使用 手办化查看源 查看。")])
+            yield event.chain_result([Plain(f"序号无效，当前有 {len(image_sources)} 个图片源。使用 #手办化查看源 查看。")])
             return
         self.conf["generic_active_source"] = idx
         self._save_config(["generic_active_source"])
         src = image_sources[idx - 1]
         alias = str(src.get("alias", "")).strip()
         display_name = alias if alias else f"图片源{idx}"
-        yield event.chain_result([Plain(f" 已切换图片源至: {display_name}")])
+        yield event.chain_result([Plain(f"✅ 已切换图片源至: {display_name}")])
 
     @filter.command("手办化切换视频源", prefix_optional=True)
     async def on_switch_video_source(self, event: AstrMessageEvent, ctx=None):
-        """手办化切换视频源 <序号> - 切换当前视频信息源"""
+        """#手办化切换视频源 <序号> - 切换当前视频信息源"""
         if not self.is_admin(event): return
         parts = event.message_str.split()
         if len(parts) < 2 or not parts[1].isdigit():
-            yield event.chain_result([Plain("用法: 手办化切换视频源 <序号>\n使用 手办化查看源 查看视频源列表")])
+            yield event.chain_result([Plain("用法: #手办化切换视频源 <序号>\n使用 #手办化查看源 查看视频源列表")])
             return
         idx = int(parts[1])
         video_sources = [s for s in self.conf.get("generic_sources", []) if str(s.get("video_model", "")).strip()]
         if idx < 1 or idx > len(video_sources):
-            yield event.chain_result([Plain(f"序号无效，当前有 {len(video_sources)} 个视频源。使用 手办化查看源 查看。")])
+            yield event.chain_result([Plain(f"序号无效，当前有 {len(video_sources)} 个视频源。使用 #手办化查看源 查看。")])
             return
         self.conf["generic_active_video_source"] = idx
         self._save_config(["generic_active_video_source"])
         src = video_sources[idx - 1]
         alias = str(src.get("alias", "")).strip()
         display_name = alias if alias else f"视频源{idx}"
-        yield event.chain_result([Plain(f" 已切换视频源至: {display_name}")])
+        yield event.chain_result([Plain(f"✅ 已切换视频源至: {display_name}")])
 
     @filter.command("手办化查看源", prefix_optional=True)
     async def on_view_sources(self, event: AstrMessageEvent, ctx=None):
-        """手办化查看源 - 查看所有信息源"""
+        """#手办化查看源 - 查看所有信息源"""
         if not self.is_admin(event): return
 
         sources = self.conf.get("generic_sources", [])
@@ -3296,30 +3101,28 @@ class FigurineProPlugin(Star):
 
         # 图片源
         if image_sources:
-            lines.append("图片源:")
+            lines.append("🖼️ 图片源:")
             for i, src in enumerate(image_sources):
                 alias = str(src.get("alias", "")).strip()
                 src_model = src.get("model", "未设置")
-                marker = " (当前)" if (i + 1) == active_img_idx else ""
-                name = alias if alias else f"图片源{i + 1}"
-                lines.append(f"  {i + 1}. {name}{marker} | 模型: {src_model}")
+                lines.append(f"  📡 {name}{marker} | 模型: {src_model}")
 
         # 视频源
         if video_sources:
-            lines.append("\n视频源:")
+            lines.append("\n🎬 视频源:")
             for i, src in enumerate(video_sources):
                 alias = str(src.get("alias", "")).strip()
                 v_model = str(src.get("video_model", "")).strip()
-                marker = " (当前)" if (i + 1) == active_vid_idx else ""
+                marker = " ⬅️ 当前" if (i + 1) == active_vid_idx else ""
                 name = alias if alias else f"视频源{i + 1}"
-                lines.append(f"  {i + 1}. {name}{marker} | 模型: {v_model}")
+                lines.append(f"  📡 {name}{marker} | 模型: {v_model}")
 
         if not image_sources and not video_sources:
             yield event.chain_result([Plain("未配置任何 API 信息源，请在 WebUI 配置页面中添加。")])
             return
 
         lines.append(f"\n------------------\n图片源: {len(image_sources)} 个, 视频源: {len(video_sources)} 个")
-        lines.append("使用 手办化切换源 <序号> 切换")
+        lines.append("使用 #手办化切换源 <序号> 切换")
         yield event.chain_result([Plain("\n".join(lines))])
 
     @filter.command("预设图片清理", prefix_optional=True)
@@ -3328,19 +3131,19 @@ class FigurineProPlugin(Star):
         parts = event.message_str.split()
         days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 30
         count = await self.data_mgr.cleanup_old_presets(days)
-        yield event.chain_result([Plain(f" 清理了 {count} 张超过 {days} 天的图片")])
+        yield event.chain_result([Plain(f"✅ 清理了 {count} 张超过 {days} 天的图片")])
 
     @filter.command("预设图片统计", prefix_optional=True)
     async def on_preset_stats(self, event: AstrMessageEvent, ctx=None):
         if not self.is_admin(event): return
         cnt, size = self.data_mgr.get_preset_stats()
-        yield event.chain_result([Plain(f" 缓存统计:\n数量: {cnt} 张\n占用: {size:.2f} MB")])
+        yield event.chain_result([Plain(f"📊 缓存统计:\n数量: {cnt} 张\n占用: {size:.2f} MB")])
 
     @filter.command("手办化视频", aliases={"视频"}, prefix_optional=True)
     async def on_video_request(self, event: AstrMessageEvent, ctx=None):
-        """手办化视频 / 视频 [比例] [时长] <提示词> +图片（可选）
+        """#手办化视频 / #视频 [比例] [时长] <提示词> +图片（可选）
 
-        示例: 视频 10 一只猫 | 视频 16:9 让画面动起来 +图片
+        示例: #视频 10 一只猫 | #视频 16:9 让画面动起来 +图片
         """
         raw_input = event.message_str.strip()
         # 移除指令前缀
@@ -3352,8 +3155,8 @@ class FigurineProPlugin(Star):
             user_input = raw_input
 
         if not user_input:
-            yield event.chain_result([Plain("用法: 视频 [比例] [时长] 提示词 +图片\n"
-                "示例: 视频 10 一只猫 | 视频 16:9 让画面动起来 +图片\n"
+            yield event.chain_result([Plain("用法: #视频 [比例] [时长] 提示词 +图片\n"
+                "示例: #视频 10 一只猫 | #视频 16:9 让画面动起来 +图片\n"
                 "比例: 1:1 / 2:3 / 3:2 / 9:16 / 16:9 | 时长: 6 / 10 / 15 秒")])
             return
 
@@ -3380,14 +3183,14 @@ class FigurineProPlugin(Star):
             return
 
         mode = "图生视频" if images else "文生视频"
-        yield event.chain_result([Plain(f" 正在进行 [{mode}] · {video_length}秒 · {aspect_ratio} ...")])
+        yield event.chain_result([Plain(f"🎬 正在进行 [{mode}] · {video_length}秒 · {aspect_ratio} ...")])
 
         video_bytes, video_url, error = await self.api_mgr.call_video_api(
             images, prompt, aspect_ratio=aspect_ratio, video_length=video_length,
         )
 
         if error:
-            yield event.chain_result([Plain(f" 视频生成失败: {error}")])
+            yield event.chain_result([Plain(f"❌ 视频生成失败: {error}")])
             return
 
         # 处理结果
@@ -3417,12 +3220,12 @@ class FigurineProPlugin(Star):
                     except Exception:
                         pass
                 else:
-                    yield event.chain_result([Plain(f" 视频下载失败: {downloaded}")])
+                    yield event.chain_result([Plain(f"❌ 视频下载失败: {downloaded}")])
             else:
-                yield event.chain_result([Plain(" 未获取到视频")])
+                yield event.chain_result([Plain("❌ 未获取到视频")])
         except Exception as e:
             logger.error(f"视频发送失败: {e}")
-            yield event.chain_result([Plain(f" 视频发送失败: {e}")])
+            yield event.chain_result([Plain(f"❌ 视频发送失败: {e}")])
 
     @filter.command("手办化帮助", aliases={"lmh", "lm帮助"}, prefix_optional=True)
     async def on_help(self, event: AstrMessageEvent, ctx=None):
@@ -3522,7 +3325,7 @@ class FigurineProPlugin(Star):
         3. 如果用户的意图不明确，请先询问用户是否需要生成图片
         4. 如果用户是在索要你自己的照片、自拍、写真、长相，请不要用这个工具，必须改用 shoubanhua_persona_photo
 
-        此工具会消耗用户的使用次数，请谨慎调用。
+        此工具会占用生成资源，请在用户确实需要图片时才调用。
         如果用户明确说“修改上面那张 / 改刚才那张 / 继续改 / 在这个基础上改”，即使当前消息没带图片，也应按 image_to_image 处理，系统会自动取最近图片上下文。
 
         Args:
@@ -3613,17 +3416,12 @@ class FigurineProPlugin(Star):
                 )
                 await event.send(event.chain_result([Plain(feedback)]))
 
-            gid = norm_id(event.get_group_id())
-            deduction = await self._check_quota(event, uid, gid, 1)
-            if not deduction["allowed"]:
-                return deduction["msg"]
-
             # 更新冷却时间
             self._update_image_cooldown(uid)
 
             await self._register_pending_generation(event.unified_msg_origin, 1)
             success, error_msg = await self._run_background_task(
-                event, [], final_prompt, preset_name, deduction, uid, gid, 1, extra_rules,
+                event, [], final_prompt, preset_name, extra_rules,
                 hide_text=True, suppress_user_error=True
             )
             if not success:
@@ -3657,17 +3455,12 @@ class FigurineProPlugin(Star):
                 return self._finalize_llm_tool_result(
                     "[TOOL_FAILED] 未检测到图片。请直接自然告诉用户需要先发图或引用图片，不要再次调用工具。")
 
-            gid = norm_id(event.get_group_id())
-            deduction = await self._check_quota(event, uid, gid, 1)
-            if not deduction["allowed"]:
-                return deduction["msg"]
-
             # 更新冷却时间
             self._update_image_cooldown(uid)
 
             await self._register_pending_generation(event.unified_msg_origin, 1)
             success, error_msg = await self._run_background_task(
-                event, images, processed_prompt, preset_name, deduction, uid, gid, 1,
+                event, images, processed_prompt, preset_name,
                 extra_rules, hide_text=True, suppress_user_error=True
             )
             if not success:
@@ -3696,7 +3489,7 @@ class FigurineProPlugin(Star):
 
         # 检查预设是否存在
         if preset_name not in self.data_mgr.prompt_map:
-            yield event.chain_result([Plain(f"预设 [{preset_name}] 不存在，先用 lm添加 创建一个吧")])
+            yield event.chain_result([Plain(f"预设 [{preset_name}] 不存在，先用 #lm添加 创建一个吧")])
             return
 
         # 提取图片
@@ -3713,7 +3506,7 @@ class FigurineProPlugin(Star):
         if count > 0:
             total = len(self.data_mgr.get_preset_ref_image_paths(preset_name))
             yield event.chain_result(
-                [Plain(f" 已为预设 [{preset_name}] 添加 {count} 张参考图\n当前共 {total} 张参考图")])
+                [Plain(f"✅ 已为预设 [{preset_name}] 添加 {count} 张参考图\n当前共 {total} 张参考图")])
         else:
             yield event.chain_result([Plain("参考图保存失败了，再试试？")])
 
@@ -3771,7 +3564,7 @@ class FigurineProPlugin(Star):
         count = await self.data_mgr.clear_preset_ref_images(preset_name)
 
         if count > 0:
-            yield event.chain_result([Plain(f" 已清除预设 [{preset_name}] 的 {count} 张参考图")])
+            yield event.chain_result([Plain(f"✅ 已清除预设 [{preset_name}] 的 {count} 张参考图")])
         else:
             yield event.chain_result([Plain(f"预设 [{preset_name}] 没有参考图")])
 
@@ -3801,7 +3594,7 @@ class FigurineProPlugin(Star):
         if success:
             remaining = len(self.data_mgr.get_preset_ref_image_paths(preset_name))
             yield event.chain_result(
-                [Plain(f" 已删除预设 [{preset_name}] 的第 {index + 1} 张参考图\n剩余 {remaining} 张")])
+                [Plain(f"✅ 已删除预设 [{preset_name}] 的第 {index + 1} 张参考图\n剩余 {remaining} 张")])
         else:
             yield event.chain_result([Plain("删除失败了，检查一下预设名和序号对不对？")])
 
@@ -3812,7 +3605,7 @@ class FigurineProPlugin(Star):
 
         stats = self.data_mgr.get_preset_ref_stats()
 
-        msg = f" 预设参考图统计:\n"
+        msg = f"📊 预设参考图统计:\n"
         msg += f"有参考图的预设: {stats['total_presets']} 个\n"
         msg += f"总图片数: {stats['total_images']} 张\n"
         msg += f"总占用: {stats['total_size_mb']:.2f} MB\n"
@@ -3838,9 +3631,9 @@ class FigurineProPlugin(Star):
             yield event.chain_result([Plain("暂无预设参考图")])
             return
 
-        msg = f" 有参考图的预设列表:\n"
+        msg = f"📋 有参考图的预设列表:\n"
         for preset, count in sorted(stats['details'].items()):
-            has_prompt = "有" if preset in self.data_mgr.prompt_map else "无"
+            has_prompt = "✓" if preset in self.data_mgr.prompt_map else "✗"
             msg += f"  [{preset}] {count}张 (预设{has_prompt})\n"
 
         yield event.chain_result([Plain(msg)])
@@ -4187,7 +3980,7 @@ class FigurineProPlugin(Star):
         return translated or default_msg
 
     async def _pack_and_send_pdf(self, event: AstrMessageEvent, images_bytes: List[bytes],
-                                 success_prefix: str = " 成功将图片打包为 PDF",
+                                 success_prefix: str = "✅ 成功将图片打包为 PDF",
                                  filename_hint: str = "") -> Tuple[bool, str]:
         """独立执行图片打包为 PDF 并发送，不依赖大模型处理逻辑"""
         tmp_path = ""
@@ -4283,10 +4076,21 @@ class FigurineProPlugin(Star):
 
     async def _run_single_batch_task(self, event: AstrMessageEvent, image_bytes: bytes,
                                      prompt: str, preset_name: str, task_index: int, total_tasks: int,
-                                     uid: str, gid: str, extra_rules: str = "",
+                                     extra_rules: str = "",
                                      image_source: str = "", hide_text: bool = False) -> Tuple[bool, str]:
         """
-        执行单个批量任务（不扣费，由调用方统一扣费）
+        执行单个批量任务
+
+        Args:
+            event: 消息事件
+            image_bytes: 输入图片数据
+            prompt: 提示词
+            preset_name: 预设名
+            task_index: 当前任务序号
+            total_tasks: 任务总数
+            extra_rules: 追加规则
+            image_source: 图片来源
+            hide_text: 是否隐藏提示文字
 
         Returns:
             (是否成功, 错误信息)
@@ -4309,7 +4113,6 @@ class FigurineProPlugin(Star):
             if isinstance(res, bytes):
                 res = await self._prepare_send_image_bytes(res)
                 elapsed = (datetime.now() - start_time).total_seconds()
-                await self.data_mgr.record_usage(uid, gid)
                 await self._register_generation_success(event.unified_msg_origin, 1)
                 await self._register_generated_image(event.unified_msg_origin, res)
 
@@ -4321,7 +4124,7 @@ class FigurineProPlugin(Star):
                 if not hide_text:
                     # 构建成功文案
                     timing_text = self._format_success_timing(elapsed)
-                    info_text = f"\n [{task_index}/{total_tasks}] 生成成功 ({timing_text}) | 预设: {preset_name}"
+                    info_text = f"\n✅ [{task_index}/{total_tasks}] 生成成功 ({timing_text}) | 预设: {preset_name}"
                     if extra_rules:
                         info_text += f" | 规则: {extra_rules[:15]}..."
                     chain_nodes.append(Plain(info_text))
@@ -4351,7 +4154,7 @@ class FigurineProPlugin(Star):
             yield event.chain_result([Plain(block_msg)])
             return
 
-        yield event.chain_result([Plain(" 正在检测可用图片，请稍候...")])
+        yield event.chain_result([Plain("📦 正在检测可用图片，请稍候...")])
 
         valid_images_bytes = await self._gather_images_for_pdf(event, max_images=0, wait_for_generation=True)
 
@@ -4364,12 +4167,12 @@ class FigurineProPlugin(Star):
             yield event.chain_result([Plain("没检测到有效的图片，如果还在弄的话稍等一下再试~")])
             return
 
-        yield event.chain_result([Plain(f" 已检测到 {len(valid_images_bytes)} 张图片，正在打包为 PDF，请稍候...")])
+        yield event.chain_result([Plain(f"📦 已检测到 {len(valid_images_bytes)} 张图片，正在打包为 PDF，请稍候...")])
 
         success, msg = await self._pack_and_send_pdf(
             event,
             valid_images_bytes,
-            success_prefix=" 成功将图片打包为 PDF",
+            success_prefix="✅ 成功将图片打包为 PDF",
             filename_hint=self._build_pdf_filename_hint(event.message_str, count=len(valid_images_bytes))
         )
         if not success:
@@ -4400,7 +4203,7 @@ class FigurineProPlugin(Star):
         #    后续的后台生成任务将不再发送单张图片，而是写入暂存列表
         await self._enter_pdf_staging_mode(session_id)
 
-        await event.send(event.chain_result([Plain(" 正在等待所有图片就绪，请稍候...")]))
+        await event.send(event.chain_result([Plain("📦 正在等待所有图片就绪，请稍候...")]))
 
         try:
             # 2. 等待所有后台生成任务完成，并收集暂存的图片
@@ -4429,14 +4232,14 @@ class FigurineProPlugin(Star):
                 valid_images_bytes = valid_images_bytes[-max_images:]
 
             await event.send(event.chain_result([
-                Plain(f" 已收集到 {len(valid_images_bytes)} 张图片，正在打包为 PDF，请稍候...")
+                Plain(f"📦 已收集到 {len(valid_images_bytes)} 张图片，正在打包为 PDF，请稍候...")
             ]))
 
             # 5. 打包并发送 PDF
             success, msg = await self._pack_and_send_pdf(
                 event,
                 valid_images_bytes,
-                success_prefix=" 成功将图片打包为 PDF",
+                success_prefix="✅ 成功将图片打包为 PDF",
                 filename_hint=self._build_pdf_filename_hint(
                     event.message_str, count=len(valid_images_bytes)
                 )
@@ -4471,7 +4274,7 @@ class FigurineProPlugin(Star):
         2. 上下文中是否确实有多张图片或PDF需要处理？
         3. 如果用户只是发送了多张图片但没有要求处理，请不要调用此工具
 
-        此工具会消耗用户大量使用次数（每张图片消耗1次），请谨慎调用。
+        此工具会占用较多生成资源，请按用户实际需求设置 max_images，避免处理过多图片。
 
         Args:
             prompt(string): 图片处理的提示词，可以是预设名+追加规则，如"手办化 皮肤白一点"
@@ -4527,10 +4330,6 @@ class FigurineProPlugin(Star):
                 logger.error(f"Failed to extract images from PDF: {e}")
 
         uid = norm_id(event.get_sender_id())
-        gid = norm_id(event.get_group_id())
-
-        uid = norm_id(event.get_sender_id())
-        gid = norm_id(event.get_group_id())
 
         # 2. 获取上下文中的图片
         session_id = event.unified_msg_origin
@@ -4560,22 +4359,10 @@ class FigurineProPlugin(Star):
         # 3. 计算预设和追加规则
         final_prompt, preset_name, extra_rules = self._process_prompt_and_preset(prompt)
 
-        # 4. 检查配额（批量任务需要足够的次数）
-        gid = norm_id(event.get_group_id())
-        total_cost = total_images
-
-        deduction = await self._check_quota(event, uid, gid, total_cost)
-        if not deduction["allowed"]:
-            return self._finalize_llm_tool_result(
-                "[TOOL_FAILED] 用户次数不足，无法完成。"
-                "请用你自己平时的语气告诉用户现在搞不了，"
-                "别提'次数''配额''限制'等词汇，随口带过就好，可以让TA联系管理员或等等再来。"
-            )
-
         # 4.1 更新冷却时间
         self._update_image_cooldown(uid)
 
-        # 根据配置决定是否隐藏进度提示（白名单用户和普通用户使用同一开关）
+        # 根据配置决定是否隐藏进度提示
         show_llm_progress = self._get_conf_bool("llm_show_progress", True)
         hide_llm_result_text = True
 
@@ -4585,12 +4372,6 @@ class FigurineProPlugin(Star):
                 "batch", preset_name=preset_name, total_images=total_images, extra_request=extra_rules
             )
             await event.send(event.chain_result([Plain(feedback)]))
-
-        # 6. 扣费
-        if deduction["source"] == "user":
-            await self.data_mgr.decrease_user_count(uid, total_cost)
-        elif deduction["source"] == "group":
-            await self.data_mgr.decrease_group_count(gid, total_cost)
 
         await self._begin_session_task(event.unified_msg_origin, "批量处理任务", total_images)
 
@@ -4647,7 +4428,6 @@ class FigurineProPlugin(Star):
                                 if isinstance(res, bytes):
                                     res = await self._prepare_send_image_bytes(res)
                                     pdf_result_images.append(res)
-                                    await self.data_mgr.record_usage(uid, gid)
                                     await self._register_generation_success(event.unified_msg_origin, 1)
                                     await self._register_generated_image(event.unified_msg_origin, res)
                                     success = True
@@ -4666,8 +4446,6 @@ class FigurineProPlugin(Star):
                                 preset_name=preset_name,
                                 task_index=i,
                                 total_tasks=total_images,
-                                uid=uid,
-                                gid=gid,
                                 extra_rules=extra_rules,
                                 image_source=url,
                                 hide_text=hide_llm_result_text
@@ -4681,7 +4459,7 @@ class FigurineProPlugin(Star):
                             if self._should_show_debug_errors():
                                 await event.send(event.chain_result([
                                     Plain(
-                                        f" 第 {i}/{total_images} 张图片生成失败 ({error_msg})\n 正在进行第 {retry_count} 次重试...")
+                                        f"⚠️ 第 {i}/{total_images} 张图片生成失败 ({error_msg})\n⏳ 正在进行第 {retry_count} 次重试...")
                                 ]))
                             await asyncio.sleep(1.5)
 
@@ -4776,7 +4554,7 @@ class FigurineProPlugin(Star):
         2. 上下文中是否确实有多张图片或PDF需要处理？
         3. 如果用户只是发送了多张图片但没有要求处理，请不要调用此工具
 
-        此工具会消耗用户大量使用次数（每张图片消耗1次），请谨慎调用。
+        此工具会占用较多生成资源，请按用户实际需求设置 max_images，避免处理过多图片。
 
         Args:
             prompt(string): 图片处理的提示词，可以是预设名+追加规则
@@ -4852,22 +4630,10 @@ class FigurineProPlugin(Star):
         # 3. 计算预设和追加规则
         final_prompt, preset_name, extra_rules = self._process_prompt_and_preset(prompt)
 
-        # 4. 检查配额
-        gid = norm_id(event.get_group_id())
-        total_cost = total_images
-
-        deduction = await self._check_quota(event, uid, gid, total_cost)
-        if not deduction["allowed"]:
-            return self._finalize_llm_tool_result(
-                "[TOOL_FAILED] 用户次数不足，无法完成。"
-                "请用你自己平时的语气告诉用户现在搞不了，"
-                "别提'次数''配额''限制'等词汇，随口带过就好，可以让TA联系管理员或等等再来。"
-            )
-
         # 4.1 更新冷却时间
         self._update_image_cooldown(uid)
 
-        # 根据配置决定是否隐藏进度提示（白名单用户和普通用户使用同一开关）
+        # 根据配置决定是否隐藏进度提示
         show_llm_progress = self._get_conf_bool("llm_show_progress", True)
         hide_llm_result_text = True
 
@@ -4878,12 +4644,6 @@ class FigurineProPlugin(Star):
                 extra_request=extra_rules, concurrency=concurrency
             )
             await event.send(event.chain_result([Plain(feedback)]))
-
-        # 6. 扣费
-        if deduction["source"] == "user":
-            await self.data_mgr.decrease_user_count(uid, total_cost)
-        elif deduction["source"] == "group":
-            await self.data_mgr.decrease_group_count(gid, total_cost)
 
         await self._begin_session_task(event.unified_msg_origin, "并发批量处理任务", total_images)
 
@@ -4939,8 +4699,7 @@ class FigurineProPlugin(Star):
                                     res = await self._prepare_send_image_bytes(res)
                                     async with results_lock:
                                         pdf_result_images_dict[index] = res
-                                    await self.data_mgr.record_usage(uid, gid)
-                                    await self._register_generation_success(event.unified_msg_origin, 1)
+                                        await self._register_generation_success(event.unified_msg_origin, 1)
                                     await self._register_generated_image(event.unified_msg_origin, res)
                                     success = True
                                     error_msg = ""
@@ -4958,8 +4717,6 @@ class FigurineProPlugin(Star):
                                 preset_name=preset_name,
                                 task_index=index,
                                 total_tasks=total_images,
-                                uid=uid,
-                                gid=gid,
                                 extra_rules=extra_rules,
                                 image_source=url,
                                 hide_text=hide_llm_result_text
@@ -4973,7 +4730,7 @@ class FigurineProPlugin(Star):
                             if self._should_show_debug_errors():
                                 await event.send(event.chain_result([
                                     Plain(
-                                        f" 第 {index}/{total_images} 张图片生成失败 ({error_msg})\n 正在进行第 {retry_count} 次重试...")
+                                        f"⚠️ 第 {index}/{total_images} 张图片生成失败 ({error_msg})\n⏳ 正在进行第 {retry_count} 次重试...")
                                 ]))
                             await asyncio.sleep(1.5)
 
@@ -5194,13 +4951,8 @@ class FigurineProPlugin(Star):
             req_count = int(count_match.group(1)) if count_match else 1
             req_count = max(1, min(req_count, self._get_active_persona().get("persona_photo_max_count", 5)))
 
-            # 配额检查
+            # 冷却检查
             uid = norm_id(event.get_sender_id())
-            gid = norm_id(event.get_group_id())
-            deduction = await self._check_quota(event, uid, gid, req_count)
-            if not deduction["allowed"]:
-                return self._finalize_llm_tool_result(
-                    "[TOOL_FAILED] 配额不足。用自己的话告诉用户今天的额度用完了。")
             self._update_image_cooldown(uid)
 
             self._log_prompt_preview(f"persona_preset:{preset_cmd}", final_prompt)
@@ -5208,7 +4960,7 @@ class FigurineProPlugin(Star):
 
             if req_count == 1:
                 success, error_msg = await self._run_background_task(
-                    event, all_images, final_prompt, preset_cmd, deduction, uid, gid, 1,
+                    event, all_images, final_prompt, preset_cmd,
                     suppress_user_error=True
                 )
                 if success:
@@ -5218,7 +4970,7 @@ class FigurineProPlugin(Star):
                 return self._build_llm_tool_failure(error_msg)
             else:
                 batch_result = await self._run_batch_image_to_image(
-                    event, all_images, final_prompt, preset_cmd, deduction, uid, gid, req_count,
+                    event, all_images, final_prompt, preset_cmd, req_count,
                     suppress_user_error=True
                 )
                 total_ok = batch_result.get("success", 0)
@@ -5344,7 +5096,7 @@ class FigurineProPlugin(Star):
             if requested_count > 1:
                 logger.info(f"人设拍照：根据用户文本语义推断为多张输出，count={requested_count}")
 
-        # 6. 限制数量（必须先做，避免错误批量参数影响配额检查和分支选择）
+        # 6. 限制数量（必须先做，避免错误的批量参数影响数量裁剪和分支选择）
         raw_count = requested_count
         count, count_limited = self._normalize_generation_count(requested_count, "persona")
 
@@ -5356,22 +5108,13 @@ class FigurineProPlugin(Star):
             )
             await event.send(event.chain_result([Plain(feedback)]))
 
-        # 8. 检查配额
-        gid = norm_id(event.get_group_id())
-        deduction = await self._check_quota(event, uid, gid, count)
-        if not deduction["allowed"]:
-            return self._finalize_llm_tool_result(
-                "[TOOL_FAILED] 用户次数不足，无法完成。"
-                "请用你自己平时的语气告诉用户现在搞不了，随口带过就好。"
-            )
-
         # 8. 更新冷却时间
         self._update_image_cooldown(uid)
 
         # 8.1 新任务开始前，若当前会话空闲则清掉上一轮生成缓存，避免后续 PDF 混入旧图
         await self._clear_session_image_cache_if_idle(event.unified_msg_origin)
 
-        # 9. 计算是否隐藏输出文本（白名单用户和普通用户使用同一开关）
+        # 9. 计算是否隐藏输出文本
         hide_llm_result_text = True
 
         # 10. 等待拍照任务完成并确认图片已发送，再把成功结果交给二次 LLM 收尾。
@@ -5382,10 +5125,6 @@ class FigurineProPlugin(Star):
                 images=final_images,
                 prompt=full_prompt,
                 preset_name=f"人设-{scene_name}",
-                deduction=deduction,
-                uid=uid,
-                gid=gid,
-                cost=1,
                 extra_rules=extra_request,
                 hide_text=hide_llm_result_text,
                 suppress_user_error=True
@@ -5409,9 +5148,6 @@ class FigurineProPlugin(Star):
                 images=final_images,
                 prompt=full_prompt,
                 preset_name=f"人设-{scene_name}",
-                deduction=deduction,
-                uid=uid,
-                gid=gid,
                 count=count,
                 extra_rules=extra_request,
                 hide_text=hide_llm_result_text,
@@ -5437,8 +5173,8 @@ class FigurineProPlugin(Star):
     async def on_persona_photo_cmd(self, event: AstrMessageEvent, ctx=None):
         """生成人设角色的日常照片（指令模式）
 
-        用法: 人设拍照 [场景] [额外要求]
-        示例: 人设拍照 咖啡店 穿白色连衣裙
+        用法: #人设拍照 [场景] [额外要求]
+        示例: #人设拍照 咖啡店 穿白色连衣裙
         """
         if not self._persona_mode:
             yield event.chain_result([Plain("人设功能还没开，联系管理员设置一下吧")])
@@ -5447,7 +5183,7 @@ class FigurineProPlugin(Star):
         # 加载人设参考图
         ref_images = await self._load_persona_ref_images()
         if not ref_images:
-            yield event.chain_result([Plain("人设参考图还没配置好，先用 人设参考图添加 添加几张吧")])
+            yield event.chain_result([Plain("人设参考图还没配置好，先用 #人设参考图添加 添加几张吧")])
             return
 
         # 解析参数
@@ -5497,29 +5233,15 @@ class FigurineProPlugin(Star):
                     " Use the additional user reference image only as requested while keeping the persona reference identity unchanged."
                 )
 
-        # 检查配额
-        uid = norm_id(event.get_sender_id())
-        gid = norm_id(event.get_group_id())
-        deduction = await self._check_quota(event, uid, gid, 1)
-        if not deduction["allowed"]:
-            yield event.chain_result([Plain(deduction["msg"])])
-            return
-
         # 发送反馈
         persona_name = self._get_active_persona().get("persona_name", "小助手")
-        feedback = f" 正在生成 {persona_name} 的照片"
+        feedback = f"📸 正在生成 {persona_name} 的照片"
         if scene_name:
-            feedback += f"\n 场景: {scene_name}"
+            feedback += f"\n🎬 场景: {scene_name}"
         if extra_request:
-            feedback += f"\n 要求: {extra_request[:30]}..."
-        feedback += "\n 请稍候..."
+            feedback += f"\n📝 要求: {extra_request[:30]}..."
+        feedback += "\n⏳ 请稍候..."
         yield event.chain_result([Plain(feedback)])
-
-        # 扣费
-        if deduction["source"] == "user":
-            await self.data_mgr.decrease_user_count(uid, 1)
-        elif deduction["source"] == "group":
-            await self.data_mgr.decrease_group_count(gid, 1)
 
         # 调用 API
         model = ""
@@ -5529,16 +5251,13 @@ class FigurineProPlugin(Star):
         if isinstance(res, bytes):
             res = await self._prepare_send_image_bytes(res)
             elapsed = (datetime.now() - start).total_seconds()
-            await self.data_mgr.record_usage(uid, gid)
             await self._register_generation_success(event.unified_msg_origin, 1)
             await self._register_generated_image(event.unified_msg_origin, res)
 
-            quota_str = self._get_quota_str(deduction, uid, gid)
             timing_text = self._format_success_timing(elapsed)
-            info = f"\n 生成成功 ({timing_text})"
+            info = f"\n✅ 生成成功 ({timing_text})"
             if scene_name:
                 info += f" | 场景: {scene_name}"
-            info += f" | 剩余: {quota_str}"
             yield event.chain_result([Image.fromBytes(res), Plain(info)])
         else:
             yield event.chain_result([Plain(f"没弄好: {self._resolve_debug_error_message(res, '这次没弄好，请稍后再试。')}")])
@@ -5547,7 +5266,7 @@ class FigurineProPlugin(Star):
     async def on_add_persona_ref(self, event: AstrMessageEvent, ctx=None):
         """添加人设参考图（管理员）
 
-        用法: 人设参考图添加 [图片]
+        用法: #人设参考图添加 [图片]
         """
         if not self.is_admin(event): return
 
@@ -5566,7 +5285,7 @@ class FigurineProPlugin(Star):
         if count > 0:
             total = len(self.data_mgr.get_preset_ref_image_paths(key))
             persona_id = int(self.conf.get("current_persona", 1))
-            yield event.chain_result([Plain(f" 已添加 {count} 张参考图到人设 {persona_id}\n当前人设共 {total} 张参考图")])
+            yield event.chain_result([Plain(f"✅ 已添加 {count} 张参考图到人设 {persona_id}\n当前人设共 {total} 张参考图")])
         else:
             yield event.chain_result([Plain("参考图保存失败了，再试试？")])
 
@@ -5611,7 +5330,7 @@ class FigurineProPlugin(Star):
 
         persona_id = int(self.conf.get("current_persona", 1))
         if count > 0:
-            yield event.chain_result([Plain(f" 已清除人设 {persona_id} 的 {count} 张参考图")])
+            yield event.chain_result([Plain(f"✅ 已清除人设 {persona_id} 的 {count} 张参考图")])
         else:
             yield event.chain_result([Plain("暂无人设参考图")])
 
@@ -5622,14 +5341,14 @@ class FigurineProPlugin(Star):
             yield event.chain_result([Plain("暂无场景配置")])
             return
 
-        msg = f" 人设场景列表 ({len(self._persona_scene_map)} 个):\n"
+        msg = f"🎬 人设场景列表 ({len(self._persona_scene_map)} 个):\n"
         for scene_name, prompt in sorted(self._persona_scene_map.items()):
             prompt_preview = prompt[:40] + "..." if len(prompt) > 40 else prompt
             msg += f"\n• {scene_name}: {prompt_preview}"
 
         default_prompt = (self._get_active_persona().get("persona_default_prompt", "") or "").strip()
         if default_prompt:
-            msg += f"\n\n 默认场景: {default_prompt[:40]}..."
+            msg += f"\n\n📌 默认场景: {default_prompt[:40]}..."
 
         yield event.chain_result([Plain(msg)])
 
@@ -5648,8 +5367,8 @@ class FigurineProPlugin(Star):
         ref_images = await self._load_persona_ref_images()
         ref_count = len(ref_images) if ref_images else 0
 
-        msg = f" 人设功能状态:\n"
-        msg += f"启用状态: {' 已启用' if self._persona_mode else ' 未启用'}\n"
+        msg = f"👤 人设功能状态:\n"
+        msg += f"启用状态: {'✅ 已启用' if self._persona_mode else '❌ 未启用'}\n"
         msg += f"当前人设: #{current_id}\n"
         msg += f"人设名称: {persona_name}\n"
         msg += f"人设描述: {persona_desc[:50]}{'...' if len(persona_desc) > 50 else ''}\n"
@@ -5682,14 +5401,14 @@ class FigurineProPlugin(Star):
                 personas.insert(0, (1, count))
 
         if not personas:
-            yield event.chain_result([Plain("暂无人设参考图。使用 人设参考图添加 上传图片。")])
+            yield event.chain_result([Plain("暂无人设参考图。使用 #人设参考图添加 上传图片。")])
             return
 
-        lines = [f" 人设列表 (当前: #{current_id} {persona_name})"]
+        lines = [f"👤 人设列表 (当前: #{current_id} {persona_name})"]
         for pid, count in personas:
-            marker = "  当前" if pid == current_id else ""
+            marker = " ⬅️ 当前" if pid == current_id else ""
             lines.append(f"  人设 {pid}: {count} 张参考图{marker}")
-        lines.append(f"\n使用 手办化切换人设 <序号> 切换")
+        lines.append(f"\n使用 #手办化切换人设 <序号> 切换")
 
         yield event.chain_result([Plain("\n".join(lines))])
 
@@ -5699,7 +5418,7 @@ class FigurineProPlugin(Star):
         if not self.is_admin(event): return
         parts = event.message_str.split()
         if len(parts) < 2 or not parts[1].isdigit():
-            yield event.chain_result([Plain("用法: 手办化切换人设 <序号>\n使用 手办化查看人设 查看可用人设")])
+            yield event.chain_result([Plain("用法: #手办化切换人设 <序号>\n使用 #手办化查看人设 查看可用人设")])
             return
         idx = int(parts[1])
 
@@ -5717,9 +5436,9 @@ class FigurineProPlugin(Star):
         if has_ref:
             ref_count = len(await self._load_persona_ref_images(idx))
             persona_name = self._get_active_persona().get("persona_name", "小助手")
-            yield event.chain_result([Plain(f" 已切换至人设 {idx} ({persona_name})，共 {ref_count} 张参考图")])
+            yield event.chain_result([Plain(f"✅ 已切换至人设 {idx} ({persona_name})，共 {ref_count} 张参考图")])
         else:
-            yield event.chain_result([Plain(f" 已切换至人设 {idx}（暂无参考图）\n使用 人设参考图添加 上传图片")])
+            yield event.chain_result([Plain(f"✅ 已切换至人设 {idx}（暂无参考图）\n使用 #人设参考图添加 上传图片")])
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=4)
     async def on_batch_process_cmd(self, event: AstrMessageEvent, ctx=None):
@@ -5778,7 +5497,6 @@ class FigurineProPlugin(Star):
 
         # 2. 获取上下文中的图片
         uid = norm_id(event.get_sender_id())
-        gid = norm_id(event.get_group_id())
         session_id = event.unified_msg_origin
         image_sources = await self._collect_images_from_context(
             session_id,
@@ -5803,32 +5521,17 @@ class FigurineProPlugin(Star):
         # 计算预设和追加规则
         final_prompt, preset_name, extra_rules = self._process_prompt_and_preset(prompt)
 
-        # 检查配额
-        total_cost = total_images
-
-        deduction = await self._check_quota(event, uid, gid, total_cost)
-        if not deduction["allowed"]:
-            yield event.chain_result(
-                [Plain("这会儿先帮不了你啦，今天有点忙不过来。你可以稍后再来，或者联系管理员看下配额设置。")])
-            return
-
         concurrency = max(1, self.conf.get("batch_concurrency", 3))
 
         # 发送开始提示
         _internal3 = {"自定义", "编辑", "edit", "custom"}
         preset_display = "" if (not preset_name or preset_name.strip().lower() in _internal3) else preset_name
-        feedback = f" 批量处理任务开始\n"
+        feedback = f"📦 批量处理任务开始\n"
         feedback += f"📷 共 {total_images} 张图片 | 并发: {concurrency}\n"
         if preset_display:
-            feedback += f" 预设: {preset_display}\n"
-        feedback += f" 图片将并发处理，请耐心等待..."
+            feedback += f"🎨 预设: {preset_display}\n"
+        feedback += f"⏳ 图片将并发处理，请耐心等待..."
         yield event.chain_result([Plain(feedback)])
-
-        # 扣费
-        if deduction["source"] == "user":
-            await self.data_mgr.decrease_user_count(uid, total_cost)
-        elif deduction["source"] == "group":
-            await self.data_mgr.decrease_group_count(gid, total_cost)
 
         # 使用信号量控制并发
         semaphore = asyncio.Semaphore(concurrency)
@@ -5869,8 +5572,6 @@ class FigurineProPlugin(Star):
                             preset_name=preset_name,
                             task_index=index,
                             total_tasks=total_images,
-                            uid=uid,
-                            gid=gid,
                             extra_rules=extra_rules,
                             image_source=url,
                             hide_text=False
@@ -5883,7 +5584,7 @@ class FigurineProPlugin(Star):
                         if retry_count <= max_retries:
                             await event.send(event.chain_result([
                                 Plain(
-                                    f" 第 {index}/{total_images} 张图片生成失败 ({error_msg})\n 正在进行第 {retry_count} 次重试...")
+                                    f"⚠️ 第 {index}/{total_images} 张图片生成失败 ({error_msg})\n⏳ 正在进行第 {retry_count} 次重试...")
                             ]))
                             await asyncio.sleep(1.5)
 
@@ -5920,14 +5621,12 @@ class FigurineProPlugin(Star):
             await asyncio.gather(*tasks)
 
             # 发送完成汇总
-            quota_str = self._get_quota_str(deduction, uid, gid)
-            summary = f"\n 批量处理完成\n"
-            summary += f" 成功: {results['success']} 张\n"
-            summary += f"失败: {results['fail']} 张\n"
-            summary += f"💰 剩余次数: {quota_str}"
+            summary = f"\n📊 批量处理完成\n"
+            summary += f"✅ 成功: {results['success']} 张\n"
+            summary += f"失败: {results['fail']} 张"
 
             if failed_details:
-                summary += f"\n\n 失败图片汇总:"
+                summary += f"\n\n📋 失败图片汇总:"
                 for detail in sorted(failed_details, key=lambda x: x['index'])[:5]:
                     summary += f"\n  • 第{detail['index']}张: {detail['reason']}"
                 if len(failed_details) > 5:
