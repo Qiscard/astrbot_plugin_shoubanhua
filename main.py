@@ -20,7 +20,7 @@ from .data_manager import DataManager
 from .image_manager import ImageManager
 from .api_manager import ApiManager
 from .context_manager import ContextManager, LLMTaskAnalyzer
-from .utils import norm_id, extract_image_urls_from_text
+from .utils import norm_id, extract_image_urls_from_text, NOTICE_PREFIX
 
 # 换衣/穿搭意图关键词
 _CLOTHING_KEYWORDS = [
@@ -2086,7 +2086,8 @@ class FigurineProPlugin(Star):
     async def _run_background_task(self, event: AstrMessageEvent, images: List[bytes],
                                    prompt: str, preset_name: str,
                                    extra_rules: str = "", model_override: str = "", hide_text: bool = False,
-                                   suppress_user_error: bool = False) -> Tuple[bool, str]:
+                                   suppress_user_error: bool = False,
+                                   image_urls: Optional[List[str]] = None) -> Tuple[bool, str]:
         """
         后台执行生成任务，并在完成后主动发送消息。
 
@@ -2098,6 +2099,7 @@ class FigurineProPlugin(Star):
             model_override: 指定使用的模型（如果为空则使用默认模型）
             hide_text: 是否隐藏生成成功提示文字
             suppress_user_error: 是否抑制面向用户的错误详情
+            image_urls: 输入图片的可访问链接，供仅支持链接的协议使用；None 表示文生图
         """
         try:
             # 2. 加载预设参考图（如果有）
@@ -2117,7 +2119,8 @@ class FigurineProPlugin(Star):
             res = None
             for attempt in range(2):
                 res = await self.api_mgr.call_api(
-                    images, prompt, model, False, self.img_mgr.proxy
+                    images, prompt, model, False, self.img_mgr.proxy,
+                    image_urls=image_urls
                 )
                 if isinstance(res, bytes) or not self._is_transient_generation_error(res) or attempt == 1:
                     break
@@ -2308,7 +2311,8 @@ class FigurineProPlugin(Star):
                                         prompt: str, preset_name: str,
                                         count: int,
                                         extra_rules: str = "", hide_text: bool = False,
-                                        suppress_user_error: bool = False) -> Dict[str, Any]:
+                                        suppress_user_error: bool = False,
+                                        image_urls: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         批量图生图后台任务 - 对同一张图片生成多个不同版本
 
@@ -2321,6 +2325,7 @@ class FigurineProPlugin(Star):
             extra_rules: 追加规则
             hide_text: 是否隐藏提示文字
             suppress_user_error: 是否抑制面向用户的错误详情
+            image_urls: 输入图片的可访问链接，供仅支持链接的协议使用；None 表示文生图
         """
         try:
             # 2. 加载预设参考图（如果有）
@@ -2351,7 +2356,8 @@ class FigurineProPlugin(Star):
 
                         while retry_count <= max_retries:
                             start_time = datetime.now()
-                            res = await self.api_mgr.call_api(images, prompt, model, False, self.img_mgr.proxy)
+                            res = await self.api_mgr.call_api(images, prompt, model, False, self.img_mgr.proxy,
+                                                              image_urls=image_urls)
 
                             if isinstance(res, bytes):
                                 res = await self._prepare_send_image_bytes(res)
@@ -2641,6 +2647,9 @@ class FigurineProPlugin(Star):
         raw_count = self._resolve_tool_requested_count(count_request_text, incoming_count=count, default=1, multi_default=3)
         count, count_limited = self._normalize_generation_count(raw_count, "edit")
 
+        # 输入图片的可访问链接：落心秋API 改图必须用链接，这里按图片顺序尽量对齐
+        input_image_urls = await self._collect_input_image_urls(event)
+
         # ==== 分支：分别批量处理多张图片 ====
         if len(images) > 1 and not merge_multiple_images:
             total_images = len(images)
@@ -2659,22 +2668,26 @@ class FigurineProPlugin(Star):
             await self._register_pending_generation(event.unified_msg_origin, total_images * count)
             semaphore = asyncio.Semaphore(max(1, self.conf.get("batch_concurrency", 3)))
 
-            async def process_single_source(img: bytes):
+            async def process_single_source(img: bytes, index: int):
+                # 每张源图只带自己对应的链接，避免把别的图链接当成它的输入
+                single_url = input_image_urls[index:index + 1] if index < len(input_image_urls) else []
                 async with semaphore:
                     if count == 1:
                         return await self._run_background_task(
                             event, [img], final_prompt, preset_name,
                             extra_rules, hide_text=hide_llm_result_text,
-                            suppress_user_error=True
+                            suppress_user_error=True, image_urls=single_url
                         )
                     else:
                         return await self._run_batch_image_to_image(
                             event, [img], final_prompt, preset_name,
                             count, extra_rules, hide_llm_result_text,
-                            suppress_user_error=True
+                            suppress_user_error=True, image_urls=single_url
                         )
 
-            branch_results = await asyncio.gather(*(process_single_source(img) for img in images))
+            branch_results = await asyncio.gather(
+                *(process_single_source(img, i) for i, img in enumerate(images))
+            )
             total_success = 0
             total_fail = 0
             branch_errors = []
@@ -2718,7 +2731,8 @@ class FigurineProPlugin(Star):
         if count == 1:
             success, error_msg = await self._run_background_task(
                 event, images, final_prompt, preset_name,
-                extra_rules, hide_text=hide_llm_result_text, suppress_user_error=True
+                extra_rules, hide_text=hide_llm_result_text, suppress_user_error=True,
+                image_urls=input_image_urls
             )
             total_success = 1 if success else 0
             total_fail = 0 if success else 1
@@ -2726,7 +2740,8 @@ class FigurineProPlugin(Star):
         else:
             batch_result = await self._run_batch_image_to_image(
                 event, images, final_prompt, preset_name, count,
-                extra_rules, hide_llm_result_text, suppress_user_error=True
+                extra_rules, hide_llm_result_text, suppress_user_error=True,
+                image_urls=input_image_urls
             )
             total_success = int(batch_result.get("success", 0))
             total_fail = int(batch_result.get("fail", 0))
@@ -2853,9 +2868,12 @@ class FigurineProPlugin(Star):
             user_prompt
         )
 
+        # 仅当本次确实带图时才提供链接：落心秋API 改图必须用链接，纯文生图不受限制
+        input_image_urls = await self._collect_input_image_urls(event) if images else None
         start = datetime.now()
         res = await self.api_mgr.call_api(
-            images, user_prompt, "", proxy=self.img_mgr.proxy
+            images, user_prompt, "", proxy=self.img_mgr.proxy,
+            image_urls=input_image_urls
         )
 
         if isinstance(res, bytes):
@@ -3281,6 +3299,47 @@ class FigurineProPlugin(Star):
             "image_urls": image_urls
         }
 
+    async def _collect_input_image_urls(self, event: AstrMessageEvent,
+                                         allow_context: bool = True,
+                                         max_images: int = 3) -> List[str]:
+        """收集输入图片的可访问链接，供只接受图片链接的协议（如落心秋API）使用。
+
+        先取当前消息（含引用消息）中的图片链接，没有再回退到最近会话上下文；
+        只保留 http(s) 链接，本地路径与 base64 对远端接口不可用。
+
+        Args:
+            event: 消息事件
+            allow_context: 当前消息没有链接时，是否回退到会话上下文
+            max_images: 从上下文回退时最多收集的图片数量
+
+        Returns:
+            http(s) 图片链接列表，可能为空。
+        """
+        def http_only(urls: List[str]) -> List[str]:
+            return [
+                str(u).strip() for u in urls
+                if isinstance(u, str) and str(u).strip().startswith(("http://", "https://"))
+            ]
+
+        current_urls = http_only(self._extract_message_info(event).get("image_urls", []))
+        if current_urls or not allow_context:
+            return current_urls
+
+        image_sources = await self._collect_images_from_context(
+            event.unified_msg_origin,
+            count=self._context_rounds,
+            include_bot=True,
+            sender_id=norm_id(event.get_sender_id()),
+        )
+        context_urls = []
+        for _, urls in reversed(image_sources):
+            for url in http_only(urls):
+                if url not in context_urls:
+                    context_urls.append(url)
+            if len(context_urls) >= max_images:
+                break
+        return context_urls[:max_images]
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message_record(self, event: AstrMessageEvent, ctx=None):
         """记录所有消息到上下文管理器（高优先级，不阻断）"""
@@ -3468,7 +3527,8 @@ class FigurineProPlugin(Star):
             await self._register_pending_generation(event.unified_msg_origin, 1)
             success, error_msg = await self._run_background_task(
                 event, images, processed_prompt, preset_name,
-                extra_rules, hide_text=True, suppress_user_error=True
+                extra_rules, hide_text=True, suppress_user_error=True,
+                image_urls=await self._collect_input_image_urls(event)
             )
             if not success:
                 return self._build_llm_tool_failure(error_msg)
@@ -3970,6 +4030,10 @@ class FigurineProPlugin(Star):
         if not err_text:
             return default_msg
 
+        # 插件自己生成的可展示提示不属于内部异常，原样保留，避免被下面的脱敏规则吞掉
+        if err_text.startswith(NOTICE_PREFIX):
+            return err_text[len(NOTICE_PREFIX):].strip() or default_msg
+
         translated = self._translate_error_to_chinese(err_text, default_msg=default_msg)
 
         unsafe_keywords = [
@@ -4084,7 +4148,8 @@ class FigurineProPlugin(Star):
     async def _run_single_batch_task(self, event: AstrMessageEvent, image_bytes: bytes,
                                      prompt: str, preset_name: str, task_index: int, total_tasks: int,
                                      extra_rules: str = "",
-                                     image_source: str = "", hide_text: bool = False) -> Tuple[bool, str]:
+                                     image_source: str = "", hide_text: bool = False,
+                                     image_urls: Optional[List[str]] = None) -> Tuple[bool, str]:
         """
         执行单个批量任务
 
@@ -4098,6 +4163,7 @@ class FigurineProPlugin(Star):
             extra_rules: 追加规则
             image_source: 图片来源
             hide_text: 是否隐藏提示文字
+            image_urls: 输入图片的可访问链接，供仅支持链接的协议使用；None 表示文生图
 
         Returns:
             (是否成功, 错误信息)
@@ -4114,7 +4180,8 @@ class FigurineProPlugin(Star):
             model = ""
             start_time = datetime.now()
 
-            res = await self.api_mgr.call_api(images, prompt, model, False, self.img_mgr.proxy)
+            res = await self.api_mgr.call_api(images, prompt, model, False, self.img_mgr.proxy,
+                                              image_urls=image_urls)
 
             # 处理结果
             if isinstance(res, bytes):
@@ -4431,7 +4498,7 @@ class FigurineProPlugin(Star):
                                         images = ref_images + images
                                 model = ""
                                 res = await self.api_mgr.call_api(images, final_prompt, model, False,
-                                                                  self.img_mgr.proxy)
+                                                                  self.img_mgr.proxy, image_urls=[url])
                                 if isinstance(res, bytes):
                                     res = await self._prepare_send_image_bytes(res)
                                     pdf_result_images.append(res)
@@ -4455,7 +4522,8 @@ class FigurineProPlugin(Star):
                                 total_tasks=total_images,
                                 extra_rules=extra_rules,
                                 image_source=url,
-                                hide_text=hide_llm_result_text
+                                hide_text=hide_llm_result_text,
+                                image_urls=[url]
                             )
 
                         if success:
@@ -4701,7 +4769,7 @@ class FigurineProPlugin(Star):
                                         images = ref_images + images
                                 model = ""
                                 res = await self.api_mgr.call_api(images, final_prompt, model, False,
-                                                                  self.img_mgr.proxy)
+                                                                  self.img_mgr.proxy, image_urls=[url])
                                 if isinstance(res, bytes):
                                     res = await self._prepare_send_image_bytes(res)
                                     async with results_lock:
@@ -4726,7 +4794,8 @@ class FigurineProPlugin(Star):
                                 total_tasks=total_images,
                                 extra_rules=extra_rules,
                                 image_source=url,
-                                hide_text=hide_llm_result_text
+                                hide_text=hide_llm_result_text,
+                                image_urls=[url]
                             )
 
                         if success:
@@ -4968,7 +5037,8 @@ class FigurineProPlugin(Star):
             if req_count == 1:
                 success, error_msg = await self._run_background_task(
                     event, all_images, final_prompt, preset_cmd,
-                    suppress_user_error=True
+                    suppress_user_error=True,
+                    image_urls=await self._collect_input_image_urls(event)
                 )
                 if success:
                     logger.info(f"[人设拍照] ✅ 成功 | 人设#{persona_id} | 预设=[{preset_cmd}] | 1张")
@@ -4978,7 +5048,8 @@ class FigurineProPlugin(Star):
             else:
                 batch_result = await self._run_batch_image_to_image(
                     event, all_images, final_prompt, preset_cmd, req_count,
-                    suppress_user_error=True
+                    suppress_user_error=True,
+                    image_urls=await self._collect_input_image_urls(event)
                 )
                 total_ok = batch_result.get("success", 0)
                 if total_ok > 0:
@@ -5126,6 +5197,10 @@ class FigurineProPlugin(Star):
 
         # 10. 等待拍照任务完成并确认图片已发送，再把成功结果交给二次 LLM 收尾。
         await self._register_pending_generation(event.unified_msg_origin, count)
+        # 人设参考图为本地文件，无法提供给仅支持链接的协议；仅透传用户提供的图片链接。
+        # final_images 非空说明本次确实需要图片输入，此时即使没有链接也传空列表，
+        # 以便仅支持链接的协议能明确报错而不是静默退化成文生图。
+        persona_input_urls = await self._collect_input_image_urls(event) if final_images else None
         if count == 1:
             success, error_msg = await self._run_background_task(
                 event=event,
@@ -5134,7 +5209,8 @@ class FigurineProPlugin(Star):
                 preset_name=f"人设-{scene_name}",
                 extra_rules=extra_request,
                 hide_text=hide_llm_result_text,
-                suppress_user_error=True
+                suppress_user_error=True,
+                image_urls=persona_input_urls
             )
             if not success:
                 logger.info(f"[人设拍照] ❌ 失败 | 人设#{persona_id} | 场景={scene_name or '兜底'} | 错误: {error_msg[:100]}")
@@ -5158,7 +5234,8 @@ class FigurineProPlugin(Star):
                 count=count,
                 extra_rules=extra_request,
                 hide_text=hide_llm_result_text,
-                suppress_user_error=True
+                suppress_user_error=True,
+                image_urls=persona_input_urls
             )
             total_success = int(batch_result.get("success", 0))
             total_fail = int(batch_result.get("fail", 0))
@@ -5253,7 +5330,8 @@ class FigurineProPlugin(Star):
         # 调用 API
         model = ""
         start = datetime.now()
-        res = await self.api_mgr.call_api(final_images, full_prompt, model, False, self.img_mgr.proxy)
+        res = await self.api_mgr.call_api(final_images, full_prompt, model, False, self.img_mgr.proxy,
+                                          image_urls=await self._collect_input_image_urls(event))
 
         if isinstance(res, bytes):
             res = await self._prepare_send_image_bytes(res)
@@ -5581,7 +5659,8 @@ class FigurineProPlugin(Star):
                             total_tasks=total_images,
                             extra_rules=extra_rules,
                             image_source=url,
-                            hide_text=False
+                            hide_text=False,
+                            image_urls=[url]
                         )
 
                         if success:

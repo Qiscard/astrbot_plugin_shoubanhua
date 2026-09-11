@@ -1,6 +1,10 @@
 import re
 from typing import Any, List
 
+# 标记插件自己产生的、可直接展示给用户的中文提示。
+# 这类文本不是内部异常，错误脱敏逻辑遇到该前缀时必须原样保留。
+NOTICE_PREFIX = "[NOTICE] "
+
 
 def norm_id(raw_id: Any) -> str:
     """标准化 ID 为字符串"""

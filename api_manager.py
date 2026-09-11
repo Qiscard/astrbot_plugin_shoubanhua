@@ -10,6 +10,8 @@ import aiohttp
 from typing import List, Dict, Tuple, Optional
 from astrbot import logger
 
+from .utils import NOTICE_PREFIX
+
 
 class ApiManager:
     def __init__(self, config: dict):
@@ -673,31 +675,28 @@ class ApiManager:
     async def _call_luoxinqiu_api(self, images: List[bytes], prompt: str,
                                   key: str, base_url: str,
                                   source_entry: Optional[Dict] = None,
-                                  proxy: str = None) -> bytes | str:
+                                  proxy: str = None,
+                                  image_urls: Optional[List[str]] = None) -> bytes | str:
         """调用落心秋API（GET 查询参数协议）。
 
-        该接口以 prompt/size/quality/url/apikey 作为查询参数，成功时返回图片二进制或
-        含图片地址的 JSON/文本。由于接口的图像编辑参数只接受可访问的图片链接，
-        而插件持有的是图片二进制数据，本协议只支持文生图；传入图片时直接返回明确提示，
-        避免把无法访问的数据静默发给服务端。
+        该接口以 prompt/url/size/quality/apikey 作为查询参数，成功时返回图片二进制或
+        含图片地址的 JSON/文本。文生图不受限制；图生图时 url 参数只接受可访问的
+        http(s) 图片链接，不支持本地文件或 base64，因此这类请求必须由调用方提供链接。
+        多张图片时 url 以数组形式重复提交（每张一个 url 参数）。
 
         Args:
-            images: 输入图片列表（本协议不支持，非空时返回提示）
+            images: 输入图片的二进制数据（本协议不使用，仅供其他源兼容）
             prompt: 生成提示词
             key: apikey
             base_url: 完整接口地址
             source_entry: 信息源原始配置，用于读取 size/quality
             proxy: 代理地址
+            image_urls: None 表示文生图（不发送 url 参数）；传入列表表示图生图，
+                其中所有 http(s) 链接以数组形式作为 url 参数。
 
         Returns:
             生成的图片字节；失败时返回错误说明字符串
         """
-        if images:
-            return (
-                "落心秋API 仅支持文生图：该接口的图像编辑参数只接受图片链接，"
-                "无法直接上传图片数据。请改用其他信息源处理图片。"
-            )
-
         source_entry = source_entry or {}
         size = str(source_entry.get("size", "") or "").strip()
         quality = str(source_entry.get("quality", "") or "").strip()
@@ -710,6 +709,21 @@ class ApiManager:
             params["size"] = size
         if quality:
             params["quality"] = quality
+
+        # 图生图：接口的 url 参数只接受图片链接，本地文件与 base64 均无法提交。
+        # 有链接时以数组形式提交全部 http(s) 链接，支持多张改图；确实带了图片但
+        # 拿不到链接时明确报错，避免静默退化成文生图。
+        if image_urls is not None:
+            links = [
+                u for u in image_urls
+                if isinstance(u, str) and u.startswith(("http://", "https://"))
+            ]
+            if not links:
+                return (
+                    NOTICE_PREFIX + "落心秋API 改图需要图片链接：当前图片不是可访问的 http(s) 链接，"
+                    "本地图片和 base64 都不支持。请发送或引用图片链接，或改用其他信息源。"
+                )
+            params["url"] = links
 
         timeout_val = self.config.get("timeout", 120)
         timeout = aiohttp.ClientTimeout(total=timeout_val)
@@ -769,6 +783,114 @@ class ApiManager:
         except Exception as e:
             import traceback
             logger.error(f"落心秋 API Call Error: {traceback.format_exc()}")
+            err_msg = str(e) or type(e).__name__
+            return f"系统错误: {err_msg}"
+
+    async def _call_nanobanana_api(self, images: List[bytes], prompt: str,
+                                   key: str, base_url: str,
+                                   source_entry: Optional[Dict] = None,
+                                   proxy: str = None,
+                                   image_urls: Optional[List[str]] = None) -> bytes | str:
+        """调用 NanoBanana API（POST + JSON body 协议）。
+
+        请求体为 {prompt, url:[...]}，apikey 以查询参数拼在接口地址上；url 为数组，
+        支持多张图片链接。成功时返回 {status:0, result:{file_url}}，下载该地址后发图。
+
+        Args:
+            images: 输入图片的二进制数据（本协议不使用，仅供其他源兼容）
+            prompt: 生成提示词
+            key: apikey
+            base_url: 完整接口地址
+            source_entry: 信息源原始配置，暂未使用，保留以兼容分流接口
+            proxy: 代理地址
+            image_urls: None 表示文生图（不发送 url 字段）；传入列表表示图生图，
+                其中所有 http(s) 链接以数组形式作为 url 字段。
+
+        Returns:
+            生成的图片字节；失败时返回错误说明字符串
+        """
+        payload = {"prompt": prompt}
+
+        # 图生图：与落心秋一致的链接约束，url 以数组提交支持多张；
+        # 带了图片却拿不到 http(s) 链接时明确报错，避免静默退化成文生图。
+        if image_urls is not None:
+            links = [
+                u for u in image_urls
+                if isinstance(u, str) and u.startswith(("http://", "https://"))
+            ]
+            if not links:
+                return (
+                    NOTICE_PREFIX + "NanoBanana 改图需要图片链接：当前图片不是可访问的 http(s) 链接，"
+                    "本地图片和 base64 都不支持。请发送或引用图片链接，或改用其他信息源。"
+                )
+            payload["url"] = links
+
+        timeout_val = self.config.get("timeout", 120)
+        timeout = aiohttp.ClientTimeout(total=timeout_val)
+        session = await self._get_session()
+        current_proxy = self._get_request_proxy(base_url, proxy)
+
+        headers = {
+            "User-Agent": "AstrBot/1.0",
+            "Content-Type": "application/json",
+        }
+        sep = "&" if "?" in base_url else "?"
+        url = f"{base_url}{sep}apikey={key}"
+
+        try:
+            async with session.post(url, json=payload, headers=headers,
+                                    proxy=current_proxy, timeout=timeout) as resp:
+                raw = await resp.read()
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+
+                if resp.status != 200:
+                    err_msg = self._extract_api_error_message(raw.decode("utf-8", errors="ignore"))
+                    return f"NanoBanana API Error {resp.status}: {err_msg[:300]}"
+
+                # 直接返回图片二进制
+                if content_type.startswith("image/") or (
+                    raw[:8] == b"\x89PNG\r\n\x1a\n"
+                    or raw[:3] == b"\xff\xd8\xff"
+                    or raw[:6] in (b"GIF87a", b"GIF89a")
+                    or (raw[:4] == b"RIFF" and raw[8:12] == b"WEBP")
+                ):
+                    return raw
+
+                text = raw.decode("utf-8", errors="ignore")
+                if "<html" in text.lower():
+                    return "HTTP 200: 服务端返回了网页而非图片接口数据"
+
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    data = None
+
+                if isinstance(data, dict):
+                    if data.get("status") == 0:
+                        file_url = ((data.get("result") or {}).get("file_url") or "").strip()
+                        if file_url:
+                            if file_url.startswith("data:"):
+                                return base64.b64decode(file_url.split(",")[-1])
+                            return await self._download_result_image(file_url, proxy, base_url)
+                        return "NanoBanana API 返回成功但缺少 result.file_url。"
+                    if "error" in data or data.get("status") not in (None, 0):
+                        return self._extract_api_error_message(text)
+
+                # 兜底：文本里的图片地址或 base64
+                img_url = self._extract_url_from_text(text)
+                if img_url:
+                    return await self._download_result_image(img_url, proxy, base_url)
+                b64_data = self._extract_base64_from_text(text)
+                if b64_data:
+                    return base64.b64decode(b64_data)
+
+                return f"NanoBanana API 返回数据异常: {text[:200]}..."
+
+        except asyncio.TimeoutError:
+            return f"请求超时 ({timeout_val}s)，请稍后再试或检查网络。"
+        except Exception as e:
+            import traceback
+            logger.error(f"NanoBanana API Call Error: {traceback.format_exc()}")
             err_msg = str(e) or type(e).__name__
             return f"系统错误: {err_msg}"
 
@@ -989,17 +1111,33 @@ class ApiManager:
 
     async def call_api(self, images: List[bytes], prompt: str,
                        model: str = "", legacy_use_power_or_proxy=None,
-                       proxy: str = None) -> bytes | str:
+                       proxy: str = None,
+                       image_urls: Optional[List[str]] = None) -> bytes | str:
+        """调用图片生成 API。
+
+        Args:
+            images: 输入图片的二进制数据
+            prompt: 生成提示词
+            model: 指定模型，空则使用信息源配置的模型
+            legacy_use_power_or_proxy: 兼容旧版调用签名的位置参数
+            proxy: 代理地址
+            image_urls: 输入图片的可访问链接，供仅支持链接的协议（如落心秋API）使用。
+                None 表示纯文生图；非 None 表示图生图。
+
+        Returns:
+            生成的图片字节；失败时返回错误说明字符串
+        """
         proxy = self._normalize_call_api_args(
             legacy_use_power_or_proxy, proxy
         )
 
         return await self._call_api_once(
-            images, prompt, model, proxy
+            images, prompt, model, proxy, image_urls
         )
 
     async def _call_api_once(self, images: List[bytes], prompt: str,
-                             model: str, proxy: str = None) -> bytes | str:
+                             model: str, proxy: str = None,
+                             image_urls: Optional[List[str]] = None) -> bytes | str:
         """核心生成逻辑"""
 
         self._reset_metrics()
@@ -1011,12 +1149,21 @@ class ApiManager:
             return "API URL 或 Key 未配置"
         base_url, key, source_model, source_prefer_images, source_force_images, source_entry = source
 
-        # 1.0 落心秋API 使用独立的 GET 查询参数协议，直接分流
-        if str((source_entry or {}).get("__template_key", "")).strip() == "luoxinqiu":
-            logger.info("已选用落心秋API 模板，走 GET 查询参数协议")
-            self._last_metrics["model"] = str((source_entry or {}).get("alias", "")).strip() or "落心秋API"
-            result = await self._call_luoxinqiu_api(
-                images, prompt, key, base_url, source_entry, proxy
+        # 1.0 特殊协议源（落心秋 GET / NanoBanana POST）走独立调用，直接分流
+        # 这些协议用 __template_key 标识，无法走通用的 chat/images API 路径。
+        template_key = str((source_entry or {}).get("__template_key", "")).strip()
+        if template_key in ("luoxinqiu", "nanobanana"):
+            if template_key == "luoxinqiu":
+                logger.info("已选用落心秋API 模板，走 GET 查询参数协议")
+                display = str((source_entry or {}).get("alias", "")).strip() or "落心秋API"
+            else:
+                logger.info("已选用 NanoBanana 模板，走 POST 风格 JSON 协议")
+                display = str((source_entry or {}).get("alias", "")).strip() or "NanoBanana"
+            self._last_metrics["model"] = display
+            result = await (
+                self._call_luoxinqiu_api(images, prompt, key, base_url, source_entry, proxy, image_urls)
+                if template_key == "luoxinqiu"
+                else self._call_nanobanana_api(images, prompt, key, base_url, source_entry, proxy, image_urls)
             )
             elapsed = asyncio.get_running_loop().time() - call_start
             self._last_metrics["upstream_duration"] = elapsed
