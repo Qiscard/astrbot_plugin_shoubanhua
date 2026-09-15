@@ -39,7 +39,7 @@ _CLOTHING_KEYWORDS = [
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方OpenAI绘图格式的文生图/图生图插件，支持多源API配置和LLM智能判断",
-    "3.1.0",
+    "3.1.1",
     "https://github.com/Qiscard/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -64,28 +64,15 @@ class FigurineProPlugin(Star):
         "enable_obedient_mode",
         "obedient_whitelist",
     ]
-    _DYNAMIC_CONFIG_KEYS = [
-        "prompt_list",
-        "generic_sources",
+    # Schema-external runtime keys live in plugin_data/runtime_state.json.
+    # AstrBotConfig drops unknown keys on load, so they cannot stay in conf.
+    _RUNTIME_STATE_KEYS = (
         "generic_active_source",
-    ]
-    _DYNAMIC_CONFIG_META_KEY = "__dynamic_overrides__"
-    _DYNAMIC_CONFIG_VERSION_KEY = "__dynamic_config_version__"
-    _DYNAMIC_CONFIG_UPDATED_AT_KEY = "__dynamic_updated_at__"
-    _DYNAMIC_CONFIG_VERSION = 3
-    _LEGACY_DYNAMIC_RESTORE_KEYS = {
-        "prompt_list",
-        "generic_api_keys",
-        "gemini_api_keys",
-    }
-    _COMMAND_PRIORITY_DYNAMIC_KEYS = {
-        "prompt_list",
-        "generic_active_source",
-    }
-    _PANEL_PRIORITY_DYNAMIC_KEYS = {
-        "generic_api_url",
-        "gemini_api_url",
-    }
+        "generic_active_video_source",
+        "current_persona",
+    )
+    _RUNTIME_STATE_FILE = "runtime_state.json"
+    _LEGACY_DYNAMIC_CONFIG_FILE = "dynamic_config.json"
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -177,183 +164,103 @@ class FigurineProPlugin(Star):
 
         return removed
 
-    def _get_schema_defaults(self) -> Dict[str, Any]:
-        """读取配置 schema 默认值，用于判断 dynamic_config 是否会覆盖用户面板保存的新配置。"""
+    def _runtime_state_path(self) -> Path:
+        """Return plugin_data path for runtime state persistence."""
+        return Path(StarTools.get_data_dir()) / self._RUNTIME_STATE_FILE
+
+    def _legacy_dynamic_config_path(self) -> Path:
+        """Return legacy dynamic_config.json path used before runtime_state."""
+        return Path(StarTools.get_data_dir()) / self._LEGACY_DYNAMIC_CONFIG_FILE
+
+    def _load_runtime_state_file(self) -> Dict[str, Any]:
+        """Load runtime_state.json; return empty dict on missing/invalid file."""
+        path = self._runtime_state_path()
+        if not path.exists():
+            return {}
         try:
-            import os
-            schema_path = os.path.join(os.path.dirname(__file__), "_conf_schema.json")
-            with open(schema_path, "r", encoding="utf-8") as f:
-                schema = json.load(f)
-
-            if not isinstance(schema, dict):
-                return {}
-
-            defaults = {}
-            for key, item in schema.items():
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") == "object" and isinstance(item.get("items"), dict):
-                    # Object group: collect nested item defaults under flat keys
-                    for sub_key, sub_item in item["items"].items():
-                        if isinstance(sub_item, dict) and "default" in sub_item:
-                            defaults[sub_key] = sub_item.get("default")
-                elif "default" in item:
-                    defaults[key] = item.get("default")
-            return defaults
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
         except Exception as e:
-            logger.warning(f"FigurinePro: 读取配置默认值失败，将使用保守恢复策略: {e}")
+            logger.warning(f"FigurinePro: failed to read runtime_state.json: {e}")
             return {}
 
-    @staticmethod
-    def _is_empty_config_value(value) -> bool:
-        return value is None or value == "" or value == [] or value == {}
+    def _write_runtime_state_file(self, state: Dict[str, Any]) -> None:
+        """Write runtime state keys to plugin_data."""
+        path = self._runtime_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        clean = {k: state[k] for k in self._RUNTIME_STATE_KEYS if k in state}
+        path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _should_restore_dynamic_value(
-            self,
-            key: str,
-            dynamic_value,
-            has_override_meta: bool,
-            schema_defaults: Dict[str, Any],
-            dynamic_backup_is_newer: Optional[bool] = None,
-    ) -> Tuple[bool, str]:
-        """决定是否用 dynamic_config 覆盖当前配置。
+    def _migrate_legacy_dynamic_runtime_keys(self) -> Dict[str, Any]:
+        """One-shot import of runtime keys from old dynamic_config.json.
 
-        原则：
-        1. 新版带元数据的命令改动仍然可以在重启后恢复；
-        2. 如果 AstrBot 当前配置已经是非默认值，说明面板保存过，优先保留面板值；
-        3. 旧版无元数据备份只恢复命令可能改动过的字段，避免老地址反复盖回去。
+        Only schema-external keys are taken. prompt_list / generic_sources stay
+        in the official WebUI config and are no longer mirrored here.
         """
-        if key not in self._DYNAMIC_CONFIG_KEYS:
-            return False, "unknown-key"
-
-        current_exists = key in self.flat
-        current_value = self.flat.get(key) if current_exists else None
-        if current_exists and current_value == dynamic_value:
-            return False, "same-value"
-
-        has_default = key in schema_defaults
-        default_value = schema_defaults.get(key)
-        current_is_default = has_default and current_value == default_value
-
-        if has_override_meta:
-            if current_exists and not current_is_default:
-                if key in self._PANEL_PRIORITY_DYNAMIC_KEYS:
-                    return False, "keep-panel-value"
-                if dynamic_backup_is_newer is True:
-                    return True, "metadata-newer"
-                if dynamic_backup_is_newer is None and key in self._COMMAND_PRIORITY_DYNAMIC_KEYS:
-                    return True, "metadata-command-priority"
-                return False, "keep-panel-value"
-            return True, "metadata-override"
-
-        if key not in self._LEGACY_DYNAMIC_RESTORE_KEYS:
-            return False, "legacy-url-or-unsupported"
-
-        if self._is_empty_config_value(dynamic_value):
-            return False, "legacy-empty"
-
-        if has_default and dynamic_value == default_value:
-            return False, "legacy-default"
-
-        if current_exists and not current_is_default:
-            return False, "keep-panel-value"
-
-        return True, "legacy-compatible"
-
-    def _build_dynamic_config_backup(self, override_keys) -> Dict[str, Any]:
-        dynamic_keys = list(self._DYNAMIC_CONFIG_KEYS)
-        clean_overrides = sorted({k for k in override_keys if k in dynamic_keys})
-
-        save_data = {}
-        for k in dynamic_keys:
-            if k in self.flat:
-                save_data[k] = self.flat[k]
-
-        save_data[self._DYNAMIC_CONFIG_META_KEY] = clean_overrides
-        save_data[self._DYNAMIC_CONFIG_VERSION_KEY] = self._DYNAMIC_CONFIG_VERSION
-        save_data[self._DYNAMIC_CONFIG_UPDATED_AT_KEY] = datetime.now().isoformat(timespec="seconds")
-        return save_data
-
-    def _write_dynamic_config_backup(self, config_path: str, override_keys) -> None:
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(self._build_dynamic_config_backup(override_keys), f, ensure_ascii=False, indent=2)
-
-    @staticmethod
-    def _coerce_existing_file_path(value) -> Optional[str]:
+        legacy_path = self._legacy_dynamic_config_path()
+        if not legacy_path.exists():
+            return {}
         try:
-            import os
-            if not value:
-                return None
+            data = json.loads(legacy_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {}
+            migrated = {}
+            for key in self._RUNTIME_STATE_KEYS:
+                if key in data and data[key] not in (None, "", [], {}):
+                    migrated[key] = data[key]
+            return migrated
+        except Exception as e:
+            logger.warning(f"FigurinePro: failed to migrate legacy dynamic_config.json: {e}")
+            return {}
 
-            path = os.fspath(value)
-            if os.path.isfile(path):
-                return path
-        except Exception:
-            return None
-        return None
+    def _restore_runtime_state(self) -> None:
+        """Restore runtime keys into conf from runtime_state.json.
 
-    def _get_config_source_mtime(self) -> Optional[float]:
-        """尽量定位 AstrBot 原始配置文件，用 mtime 判断面板保存和命令备份谁更新。"""
-        import os
-
-        candidates = []
-        attr_names = (
-            "path",
-            "file_path",
-            "filepath",
-            "config_path",
-            "_path",
-            "_file_path",
-            "_filepath",
-            "_config_path",
-        )
-        key_names = (
-            "__config_path__",
-            "_config_path",
-            "config_path",
-            "path",
-        )
-
-        for attr in attr_names:
-            candidates.append(getattr(self.conf, attr, None))
-
-        for key in key_names:
-            try:
-                candidates.append(self.flat.get(key))
-            except Exception:
-                pass
-
-        try:
-            for value in vars(self.conf).values():
-                if isinstance(value, (str, os.PathLike)):
-                    candidates.append(value)
-        except Exception:
-            pass
-
-        mtimes = []
-        for candidate in candidates:
-            path = self._coerce_existing_file_path(candidate)
-            if path:
+        Falls back once to legacy dynamic_config.json values, then writes the
+        new runtime_state file so subsequent boots skip the legacy path.
+        """
+        state = self._load_runtime_state_file()
+        source = "runtime_state.json"
+        if not state:
+            state = self._migrate_legacy_dynamic_runtime_keys()
+            source = "legacy dynamic_config.json"
+            if state:
                 try:
-                    mtimes.append(os.path.getmtime(path))
-                except Exception:
-                    pass
+                    self._write_runtime_state_file(state)
+                    logger.info(
+                        f"FigurinePro: migrated {len(state)} runtime keys from dynamic_config.json "
+                        f"to {self._RUNTIME_STATE_FILE}"
+                    )
+                except Exception as e:
+                    logger.warning(f"FigurinePro: failed to write migrated runtime_state: {e}")
 
-        return max(mtimes) if mtimes else None
+        if not state:
+            return
 
-    def _is_dynamic_backup_newer_than_config(self, config_path: str) -> Optional[bool]:
-        import os
+        restored = []
+        for key in self._RUNTIME_STATE_KEYS:
+            if key not in state:
+                continue
+            value = state[key]
+            self.conf[key] = value
+            restored.append(f"{key}={value}")
+        if restored:
+            logger.info(f"FigurinePro: restored runtime state from {source}: {', '.join(restored)}")
 
-        config_mtime = self._get_config_source_mtime()
-        if config_mtime is None:
-            return None
-
-        try:
-            dynamic_mtime = os.path.getmtime(config_path)
-        except Exception:
-            return None
-
-        return dynamic_mtime >= config_mtime
+    def _save_runtime_state(self, changed_keys: Optional[List[str]] = None) -> None:
+        """Persist current runtime keys; optionally only touch listed keys."""
+        state = self._load_runtime_state_file()
+        keys = (
+            [k for k in changed_keys if k in self._RUNTIME_STATE_KEYS]
+            if changed_keys is not None
+            else list(self._RUNTIME_STATE_KEYS)
+        )
+        for key in keys:
+            if key in self.conf:
+                state[key] = self.conf[key]
+            elif key in self.flat:
+                state[key] = self.flat[key]
+        self._write_runtime_state_file(state)
 
     def _is_message_processed(self, msg_id: str) -> bool:
         """
@@ -605,87 +512,8 @@ class FigurineProPlugin(Star):
         if removed_from_runtime > 0:
             logger.info(f"FigurinePro: 已从运行时配置中清理 {removed_from_runtime} 个废弃强力模式字段")
 
-        # 将 template_list 分组配置展平为 flat keys，保持代码兼容
-
-        # 尝试加载动态配置备份。命令改动过的字段需要覆盖 schema 默认值，
-        # 但面板里已经保存的新配置要优先，避免地址/Key 被旧备份盖回去。
-        import os
-        import json
-        config_path = os.path.join(StarTools.get_data_dir(), "dynamic_config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    dynamic_conf = json.load(f)
-
-                if not isinstance(dynamic_conf, dict):
-                    dynamic_conf = {}
-
-                dynamic_backup_changed = False
-                removed_from_backup = self._purge_deprecated_config_keys(dynamic_conf)
-                if removed_from_backup > 0:
-                    dynamic_backup_changed = True
-                    logger.info(
-                        f"FigurinePro: 已从 dynamic_config.json 清理 {removed_from_backup} 个废弃强力模式字段")
-
-                restored_count = 0
-                skipped_count = 0
-                dynamic_keys = set(self._DYNAMIC_CONFIG_KEYS)
-                override_keys = dynamic_conf.get(self._DYNAMIC_CONFIG_META_KEY)
-                has_override_meta = isinstance(override_keys, list)
-                if has_override_meta:
-                    keys_to_restore = [k for k in override_keys if k in dynamic_keys]
-                    active_override_keys = set(keys_to_restore)
-                else:
-                    # 兼容旧版 dynamic_config.json：没有元数据时，只恢复命令可能改动过的字段。
-                    keys_to_restore = [k for k in dynamic_conf.keys() if k in dynamic_keys]
-                    active_override_keys = set()
-                    dynamic_backup_changed = True
-
-                schema_defaults = self._get_schema_defaults()
-                dynamic_backup_is_newer = self._is_dynamic_backup_newer_than_config(config_path)
-                restored_keys = []
-                skip_reasons: Dict[str, int] = {}
-                for k in keys_to_restore:
-                    if k not in dynamic_conf:
-                        skipped_count += 1
-                        active_override_keys.discard(k)
-                        skip_reasons["missing-value"] = skip_reasons.get("missing-value", 0) + 1
-                        continue
-
-                    v = dynamic_conf.get(k)
-                    should_restore, reason = self._should_restore_dynamic_value(
-                        k, v, has_override_meta, schema_defaults, dynamic_backup_is_newer
-                    )
-
-                    if should_restore:
-                        self.flat[k] = v
-                        restored_count += 1
-                        restored_keys.append(k)
-                        active_override_keys.add(k)
-                    else:
-                        skipped_count += 1
-                        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                        if reason == "keep-panel-value":
-                            active_override_keys.discard(k)
-                            dynamic_backup_changed = True
-
-                if not has_override_meta:
-                    active_override_keys = set(restored_keys)
-
-                logger.info(
-                    f"FigurinePro: dynamic_config.json 恢复完成，恢复 {restored_count} 项，跳过 {skipped_count} 项"
-                )
-                if skip_reasons:
-                    logger.info(f"FigurinePro: dynamic_config.json 跳过原因统计: {skip_reasons}")
-
-                normalized_overrides = sorted(active_override_keys)
-                if dynamic_backup_changed or (
-                        has_override_meta and normalized_overrides != sorted(keys_to_restore)
-                ):
-                    self._write_dynamic_config_backup(config_path, normalized_overrides)
-                    logger.info("FigurinePro: 已规范化 dynamic_config.json，后续不会反复覆盖面板配置")
-            except Exception as e:
-                logger.error(f"FigurinePro: 恢复动态配置失败 {e}")
+        # Restore schema-external runtime keys (active source / persona index).
+        self._restore_runtime_state()
 
         await self.data_mgr.initialize()
         self.img_mgr.schedule_default_font_install(self.data_mgr.data_dir)
@@ -694,7 +522,7 @@ class FigurineProPlugin(Star):
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
         logger.info(
-            f"FigurinePro 插件已加载 v3.1.0 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
+            f"FigurinePro 插件已加载 v3.1.1 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 
     def is_admin(self, event: AstrMessageEvent) -> bool:
         return event.get_sender_id() in self.context.get_config().get("admins_id", [])
@@ -734,10 +562,16 @@ class FigurineProPlugin(Star):
         return bot_id or ""
 
     def _save_config(self, changed_keys: Optional[List[str]] = None):
+        """Save official config via AstrBot, and runtime keys to plugin_data.
+
+        Args:
+            changed_keys: Optional list of keys that just changed. Runtime keys
+                in this list are written to runtime_state.json; schema keys only
+                go through conf.save().
+        """
         try:
             self._purge_deprecated_config_keys()
 
-            # 尝试 AstrBot 原生配置保存
             saved = False
             try:
                 if hasattr(self.conf, "save") and callable(self.conf.save):
@@ -747,42 +581,22 @@ class FigurineProPlugin(Star):
                     self.context.save_config(self.conf)
                     saved = True
             except Exception as e:
-                logger.warning(f"FigurinePro: AstrBot 原生配置保存失败，将继续写入动态备份: {e}")
+                logger.warning(f"FigurinePro: AstrBot native config save failed: {e}")
 
-            # 无论原生是否成功，都在插件目录做一份备份以防万一
-            import os
-            import json
-            config_path = os.path.join(StarTools.get_data_dir(), "dynamic_config.json")
-
-            dynamic_keys = list(self._DYNAMIC_CONFIG_KEYS)
-            previous_overrides = set()
-            if os.path.exists(config_path):
+            # Always persist schema-external runtime keys separately.
+            runtime_changed = None
+            if changed_keys is not None:
+                runtime_changed = [k for k in changed_keys if k in self._RUNTIME_STATE_KEYS]
+            if runtime_changed is None or runtime_changed:
                 try:
-                    with open(config_path, "r", encoding="utf-8") as rf:
-                        previous_data = json.load(rf)
-                    if isinstance(previous_data, dict):
-                        previous_raw = previous_data.get(self._DYNAMIC_CONFIG_META_KEY)
-                        if isinstance(previous_raw, list):
-                            previous_overrides = {k for k in previous_raw if k in dynamic_keys}
-                        elif previous_raw is not None:
-                            previous_overrides = {
-                                k for k in previous_data.keys()
-                                if k in self._LEGACY_DYNAMIC_RESTORE_KEYS
-                                and previous_data.get(k) not in (None, "", [], {})
-                            }
-                except Exception:
-                    previous_overrides = set()
-
-            if changed_keys:
-                current_overrides = {k for k in changed_keys if k in dynamic_keys}
-                override_keys = sorted(previous_overrides | current_overrides)
-            else:
-                override_keys = sorted(previous_overrides or dynamic_keys)
-
-            self._write_dynamic_config_backup(config_path, override_keys)
+                    self._save_runtime_state(runtime_changed)
+                except Exception as e:
+                    logger.warning(f"FigurinePro: runtime_state save failed: {e}")
 
             if not saved:
-                logger.info("FigurinePro: 无法通过原生方法保存，已使用本地 dynamic_config.json 进行了持久化")
+                logger.info(
+                    "FigurinePro: native config save unavailable; runtime keys still persisted if needed"
+                )
 
         except Exception as e:
             logger.error(f"FigurinePro Config Save Failed: {e}")
