@@ -16,6 +16,7 @@ from astrbot.core.message.components import Image, Plain, Node, Nodes, Reply, Vi
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 # 导入模块
+from .flat_config import FlatConfigView
 from .data_manager import DataManager
 from .image_manager import ImageManager
 from .api_manager import ApiManager
@@ -38,7 +39,7 @@ _CLOTHING_KEYWORDS = [
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方OpenAI绘图格式的文生图/图生图插件，支持多源API配置和LLM智能判断",
-    "3.0.1",
+    "3.1.0",
     "https://github.com/Qiscard/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -89,30 +90,33 @@ class FigurineProPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.conf = config
+        # Flat view over the nested object-grouped config: existing flat-key
+        # reads keep working, schema-external runtime keys fall to top level.
+        self.flat = FlatConfigView(config, getattr(config, "schema", None))
 
-        self.data_mgr = DataManager(StarTools.get_data_dir(), config)
-        self.img_mgr = ImageManager(config)
-        self.api_mgr = ApiManager(config)
+        self.data_mgr = DataManager(StarTools.get_data_dir(), self.flat)
+        self.img_mgr = ImageManager(self.flat)
+        self.api_mgr = ApiManager(self.flat)
 
         # 上下文管理器
         self.ctx_mgr = ContextManager(
-            max_messages=config.get("context_max_messages", 50),
-            max_sessions=config.get("context_max_sessions", 100)
+            max_messages=self.flat.get("context_max_messages", 50),
+            max_sessions=self.flat.get("context_max_sessions", 100)
         )
 
         # LLM 智能判断配置
-        self._llm_auto_detect = config.get("enable_llm_auto_detect", False)
-        self._context_rounds = config.get("context_rounds", 20)
+        self._llm_auto_detect = self.flat.get("enable_llm_auto_detect", False)
+        self._context_rounds = self.flat.get("context_rounds", 20)
         # 提高默认置信度阈值，减少误触发
-        self._auto_detect_confidence = config.get("auto_detect_confidence", 0.8)
+        self._auto_detect_confidence = self.flat.get("auto_detect_confidence", 0.8)
 
         # 日常人设配置
-        self._persona_mode = config.get("enable_persona_mode", False)
+        self._persona_mode = self.flat.get("enable_persona_mode", False)
         self._persona_scene_map = {}  # 场景关键词 -> 提示词
         self._load_persona_scenes()
 
         # 图片生成冷却时间（只针对图片生成，不影响正常聊天）
-        self._image_cooldown_seconds = config.get("llm_cooldown_seconds", 60)
+        self._image_cooldown_seconds = self.flat.get("llm_cooldown_seconds", 60)
         self._user_last_image_gen: Dict[str, datetime] = {}  # 用户ID -> 上次图片生成时间
 
         # 消息去重缓存（防止多平台重复处理同一消息）
@@ -131,14 +135,14 @@ class FigurineProPlugin(Star):
         # 会话级最近成功生成图片缓存（用于 PDF 打包时直接拿到刚生成完成的图片）
         self._session_generated_images: Dict[str, List[bytes]] = {}  # session_id -> recent image bytes
         self._session_generated_images_lock = asyncio.Lock()
-        self._session_generated_images_max = max(1, int(config.get("pdf_session_image_cache", 20)))
+        self._session_generated_images_max = max(1, int(self.flat.get("pdf_session_image_cache", 20)))
 
         # 会话级最近图片上下文：同时记录用户发送的图片和 Bot 生成的图片，供“修改上面那张”这类追问使用
         self._session_recent_image_context: Dict[str, List[Dict[str, Any]]] = {}
         self._session_recent_image_context_lock = asyncio.Lock()
         self._session_recent_image_context_max = max(
             1,
-            int(config.get("context_image_cache", self._session_generated_images_max) or self._session_generated_images_max)
+            int(self.flat.get("context_image_cache", self._session_generated_images_max) or self._session_generated_images_max)
         )
 
         # PDF 暂存模式：当 pack_images_to_pdf 被调用时，通知后台生成任务不要发送单张图片，
@@ -186,7 +190,14 @@ class FigurineProPlugin(Star):
 
             defaults = {}
             for key, item in schema.items():
-                if isinstance(item, dict) and "default" in item:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "object" and isinstance(item.get("items"), dict):
+                    # Object group: collect nested item defaults under flat keys
+                    for sub_key, sub_item in item["items"].items():
+                        if isinstance(sub_item, dict) and "default" in sub_item:
+                            defaults[sub_key] = sub_item.get("default")
+                elif "default" in item:
                     defaults[key] = item.get("default")
             return defaults
         except Exception as e:
@@ -215,8 +226,8 @@ class FigurineProPlugin(Star):
         if key not in self._DYNAMIC_CONFIG_KEYS:
             return False, "unknown-key"
 
-        current_exists = key in self.conf
-        current_value = self.conf.get(key) if current_exists else None
+        current_exists = key in self.flat
+        current_value = self.flat.get(key) if current_exists else None
         if current_exists and current_value == dynamic_value:
             return False, "same-value"
 
@@ -255,8 +266,8 @@ class FigurineProPlugin(Star):
 
         save_data = {}
         for k in dynamic_keys:
-            if k in self.conf:
-                save_data[k] = self.conf[k]
+            if k in self.flat:
+                save_data[k] = self.flat[k]
 
         save_data[self._DYNAMIC_CONFIG_META_KEY] = clean_overrides
         save_data[self._DYNAMIC_CONFIG_VERSION_KEY] = self._DYNAMIC_CONFIG_VERSION
@@ -308,7 +319,7 @@ class FigurineProPlugin(Star):
 
         for key in key_names:
             try:
-                candidates.append(self.conf.get(key))
+                candidates.append(self.flat.get(key))
             except Exception:
                 pass
 
@@ -535,7 +546,7 @@ class FigurineProPlugin(Star):
     def _get_persona_key(self, persona_id: int = 0) -> str:
         """获取人设存储键名。persona_id=0 时使用当前激活的人设。"""
         if persona_id <= 0:
-            persona_id = int(self.conf.get("current_persona", 1))
+            persona_id = int(self.flat.get("current_persona", 1))
         return f"_persona_{persona_id}_"
 
     def _get_active_persona(self) -> Dict[str, Any]:
@@ -544,9 +555,9 @@ class FigurineProPlugin(Star):
         从 persona_list 中按 current_persona 索引读取。
         如果 persona_list 不存在或为空，回退到旧版顶级字段。
         """
-        persona_list = self.conf.get("persona_list", [])
+        persona_list = self.flat.get("persona_list", [])
         if persona_list and isinstance(persona_list, list):
-            idx = int(self.conf.get("current_persona", 1)) - 1
+            idx = int(self.flat.get("current_persona", 1)) - 1
             if 0 <= idx < len(persona_list):
                 return persona_list[idx]
             if persona_list:
@@ -554,13 +565,13 @@ class FigurineProPlugin(Star):
 
         # 回退旧版顶级字段
         return {
-            "persona_name": self.conf.get("persona_name", "小助手"),
-            "persona_description": self.conf.get("persona_description", "一个可爱的二次元女孩"),
-            "persona_trigger_keywords": self.conf.get("persona_trigger_keywords", ["拍照", "自拍", "看看你"]),
-            "persona_scene_prompts": self.conf.get("persona_scene_prompts", []),
-            "persona_default_prompt": self.conf.get("persona_default_prompt", ""),
-            "persona_photo_style": self.conf.get("persona_photo_style", ""),
-            "persona_photo_max_count": self.conf.get("persona_photo_max_count", 5),
+            "persona_name": self.flat.get("persona_name", "小助手"),
+            "persona_description": self.flat.get("persona_description", "一个可爱的二次元女孩"),
+            "persona_trigger_keywords": self.flat.get("persona_trigger_keywords", ["拍照", "自拍", "看看你"]),
+            "persona_scene_prompts": self.flat.get("persona_scene_prompts", []),
+            "persona_default_prompt": self.flat.get("persona_default_prompt", ""),
+            "persona_photo_style": self.flat.get("persona_photo_style", ""),
+            "persona_photo_max_count": self.flat.get("persona_photo_max_count", 5),
         }
 
     def _load_persona_scenes(self):
@@ -577,7 +588,7 @@ class FigurineProPlugin(Star):
     async def _load_persona_ref_images(self, persona_id: int = 0) -> List[bytes]:
         """加载指定人设的参考图。persona_id=0 时使用当前激活的人设。"""
         if persona_id <= 0:
-            persona_id = int(self.conf.get("current_persona", 1))
+            persona_id = int(self.flat.get("current_persona", 1))
         key = f"_persona_{persona_id}_"
 
         if self.data_mgr.has_preset_ref_images(key):
@@ -647,7 +658,7 @@ class FigurineProPlugin(Star):
                     )
 
                     if should_restore:
-                        self.conf[k] = v
+                        self.flat[k] = v
                         restored_count += 1
                         restored_keys.append(k)
                         active_override_keys.add(k)
@@ -678,12 +689,12 @@ class FigurineProPlugin(Star):
 
         await self.data_mgr.initialize()
         self.img_mgr.schedule_default_font_install(self.data_mgr.data_dir)
-        if not self.conf.get("generic_sources", []):
+        if not self.flat.get("generic_sources", []):
             logger.warning("FigurinePro: 未配置任何 API 信息源，请在 WebUI 中添加")
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
         logger.info(
-            f"FigurinePro 插件已加载 v3.0.1 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
+            f"FigurinePro 插件已加载 v3.1.0 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 
     def is_admin(self, event: AstrMessageEvent) -> bool:
         return event.get_sender_id() in self.context.get_config().get("admins_id", [])
@@ -781,10 +792,10 @@ class FigurineProPlugin(Star):
         if not prompt:
             return prompt
 
-        if not self.conf.get("enable_preset_safety_suffix", True):
+        if not self.flat.get("enable_preset_safety_suffix", True):
             return prompt
 
-        suffix = self.conf.get(
+        suffix = self.flat.get(
             "preset_safety_suffix",
             "The final output must remain normal-scale and non-explicit. Avoid nudity, explicit sexual content, fetish-focused close-ups, voyeuristic angles, exposed private parts, non-consensual implications, or pornographic composition. Keep the character fully covered with appropriate clothing or safe occlusion when needed. Prioritize character design consistency, outfit details, expression sheets, prop details, full-body composition, and tasteful multi-angle presentation."
         ).strip()
@@ -801,11 +812,11 @@ class FigurineProPlugin(Star):
 
     def _log_prompt_preview(self, scene: str, prompt: str):
         """输出更完整的提示词日志，避免默认日志不完整"""
-        if not self.conf.get("enable_verbose_prompt_log", True):
+        if not self.flat.get("enable_verbose_prompt_log", True):
             return
 
         try:
-            max_len = int(self.conf.get("prompt_log_max_length", 12000))
+            max_len = int(self.flat.get("prompt_log_max_length", 12000))
         except Exception:
             max_len = 12000
 
@@ -856,7 +867,7 @@ class FigurineProPlugin(Star):
 
     def _get_generation_count_limit(self, task_type: str = "generic") -> int:
         """获取不同任务类型的数量上限"""
-        default_limit = max(1, int(self.conf.get("llm_max_count", 10)))
+        default_limit = max(1, int(self.flat.get("llm_max_count", 10)))
 
         config_map = {
             "draw": "draw_max_count",
@@ -865,7 +876,7 @@ class FigurineProPlugin(Star):
             "generic": "llm_max_count",
         }
         conf_key = config_map.get(task_type, "llm_max_count")
-        return max(1, int(self.conf.get(conf_key, default_limit)))
+        return max(1, int(self.flat.get(conf_key, default_limit)))
 
     def _normalize_generation_count(self, requested_count: int, task_type: str = "generic") -> Tuple[int, bool]:
         """统一裁剪生成数量，返回(最终数量, 是否被裁剪)"""
@@ -1596,7 +1607,7 @@ class FigurineProPlugin(Star):
             await self._stage_image_for_pdf(session_id, image_bytes, staging_index=staging_index)
             return True
 
-        grace_seconds = max(0.0, float(self.conf.get("pdf_staging_grace_seconds", 1.2) or 0.0))
+        grace_seconds = max(0.0, float(self.flat.get("pdf_staging_grace_seconds", 1.2) or 0.0))
         if grace_seconds > 0:
             await asyncio.sleep(grace_seconds)
             if self._is_pdf_staging_mode(session_id):
@@ -1626,7 +1637,7 @@ class FigurineProPlugin(Star):
         Returns:
             图片字节列表（顺序与输入/生成顺序一致）
         """
-        poll_interval = max(1, self.conf.get("pdf_wait_poll_interval", 2))
+        poll_interval = max(1, self.flat.get("pdf_wait_poll_interval", 2))
         waited = 0
 
         while waited < timeout:
@@ -1666,7 +1677,7 @@ class FigurineProPlugin(Star):
 
     def _get_conf_bool(self, key: str, default: bool = False) -> bool:
         """兼容字符串/数字形式的布尔配置，避免 bool('false') 误判为 True。"""
-        value = self.conf.get(key, default)
+        value = self.flat.get(key, default)
 
         if isinstance(value, bool):
             return value
@@ -2104,7 +2115,7 @@ class FigurineProPlugin(Star):
         try:
             # 2. 加载预设参考图（如果有）
             # 注意：人设功能（preset_name 以 "人设-" 开头）已经在调用前加载了参考图，不需要重复加载
-            if preset_name != "自定义" and not preset_name.startswith("人设-") and self.conf.get(
+            if preset_name != "自定义" and not preset_name.startswith("人设-") and self.flat.get(
                     "enable_preset_ref_images", True):
                 ref_images = await self._load_preset_ref_images(preset_name)
                 if ref_images:
@@ -2146,7 +2157,7 @@ class FigurineProPlugin(Star):
                     info_text = f"\n✅ 生成成功 ({timing_text}) | 预设: {preset_name}"
                     if extra_rules:
                         info_text += f" | 规则: {extra_rules[:20]}{'...' if len(extra_rules) > 20 else ''}"
-                    if self.conf.get("show_model_info", False):
+                    if self.flat.get("show_model_info", False):
                         info_text += f" | {model}"
                     chain_nodes.append(Plain(info_text))
                 else:
@@ -2200,7 +2211,7 @@ class FigurineProPlugin(Star):
         try:
             # 2. 加载预设参考图（如果有）
             images = []
-            if preset_name != "自定义" and self.conf.get("enable_preset_ref_images", True):
+            if preset_name != "自定义" and self.flat.get("enable_preset_ref_images", True):
                 ref_images = await self._load_preset_ref_images(preset_name)
                 if ref_images:
                     images = ref_images
@@ -2209,8 +2220,8 @@ class FigurineProPlugin(Star):
             # 3. 获取文生图模型
             model = ""
 
-            concurrency = max(1, self.conf.get("batch_concurrency", 3))
-            max_retries = self.conf.get("batch_retries", 2)
+            concurrency = max(1, self.flat.get("batch_concurrency", 3))
+            max_retries = self.flat.get("batch_retries", 2)
 
             semaphore = asyncio.Semaphore(concurrency)
             results = {"success": 0, "fail": 0, "errors": []}
@@ -2329,7 +2340,7 @@ class FigurineProPlugin(Star):
         """
         try:
             # 2. 加载预设参考图（如果有）
-            if preset_name != "自定义" and preset_name != "编辑" and self.conf.get("enable_preset_ref_images", True):
+            if preset_name != "自定义" and preset_name != "编辑" and self.flat.get("enable_preset_ref_images", True):
                 ref_images = await self._load_preset_ref_images(preset_name)
                 if ref_images:
                     # 将参考图添加到图片列表前面
@@ -2339,8 +2350,8 @@ class FigurineProPlugin(Star):
             # 3. 获取模型
             model = ""
 
-            concurrency = max(1, self.conf.get("batch_concurrency", 3))
-            max_retries = self.conf.get("batch_retries", 2)
+            concurrency = max(1, self.flat.get("batch_concurrency", 3))
+            max_retries = self.flat.get("batch_retries", 2)
 
             semaphore = asyncio.Semaphore(concurrency)
             results = {"success": 0, "fail": 0, "errors": []}
@@ -2666,7 +2677,7 @@ class FigurineProPlugin(Star):
 
             # 多张图片分别处理时也走并发，避免 LLM 识别到多图后仍然一张张串行跑
             await self._register_pending_generation(event.unified_msg_origin, total_images * count)
-            semaphore = asyncio.Semaphore(max(1, self.conf.get("batch_concurrency", 3)))
+            semaphore = asyncio.Semaphore(max(1, self.flat.get("batch_concurrency", 3)))
 
             async def process_single_source(img: bytes, index: int):
                 # 每张源图只带自己对应的链接，避免把别的图链接当成它的输入
@@ -2766,7 +2777,7 @@ class FigurineProPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=5)
     async def on_figurine_request(self, event: AstrMessageEvent, ctx=None):
-        if self.conf.get("prefix", True) and not event.is_at_or_wake_command:
+        if self.flat.get("prefix", True) and not event.is_at_or_wake_command:
             return
 
         text = event.message_str.strip()
@@ -2786,7 +2797,7 @@ class FigurineProPlugin(Star):
         user_prompt = ""
         preset_name = "自定义"
 
-        extra_prefix = self.conf.get("extra_prefix", "bnn")
+        extra_prefix = self.flat.get("extra_prefix", "bnn")
         is_bnn = (base_cmd == extra_prefix)
 
         if is_bnn:
@@ -2816,7 +2827,7 @@ class FigurineProPlugin(Star):
         # 指令模式：先启动本处理流程，再发提示，避免被 after_message_sent 类插件截断后半段逻辑。
         _internal = {"自定义", "编辑", "edit", "custom"}
         preset_display = "" if (not preset_name or preset_name.strip().lower() in _internal) else preset_name
-        template = self.conf.get("generating_msg_template", "🎨 收到请求，正在生成 [{preset}]...")
+        template = self.flat.get("generating_msg_template", "🎨 收到请求，正在生成 [{preset}]...")
         feedback = template.replace("{preset}", preset_display) if preset_display else template.replace(" [{preset}]",
                                                                                                         "").replace(
             "[{preset}]", "")
@@ -2885,7 +2896,7 @@ class FigurineProPlugin(Star):
 
             timing_text = self._format_success_timing(elapsed)
             info = f"\n✅ 生成成功 ({timing_text}) | 预设: {preset_name}"
-            if self.conf.get("show_model_info", False):
+            if self.flat.get("show_model_info", False):
                 info += f" | 模型: {self.api_mgr.get_last_metrics().get('model', '默认')}"
 
             yield event.chain_result([Image.fromBytes(res), Plain(info)])
@@ -2903,7 +2914,7 @@ class FigurineProPlugin(Star):
 
         _internal2 = {"自定义", "编辑", "edit", "custom"}
         preset_display = "" if (not preset_name or preset_name.strip().lower() in _internal2) else preset_name
-        template = self.conf.get("generating_msg_template", "🎨 收到请求，正在生成 [{preset}]...")
+        template = self.flat.get("generating_msg_template", "🎨 收到请求，正在生成 [{preset}]...")
         feedback = template.replace("{preset}", preset_display) if preset_display else template.replace(" [{preset}]",
                                                                                                         "").replace(
             "[{preset}]", "")
@@ -2911,7 +2922,7 @@ class FigurineProPlugin(Star):
 
         # 加载预设参考图
         images = []
-        if preset_name != "自定义" and self.conf.get("enable_preset_ref_images", True):
+        if preset_name != "自定义" and self.flat.get("enable_preset_ref_images", True):
             ref_images = await self._load_preset_ref_images(preset_name)
             if ref_images:
                 images = ref_images
@@ -2940,7 +2951,7 @@ class FigurineProPlugin(Star):
 
     # 辅助方法
     def _get_help_node(self, event):
-        txt = self.conf.get("help_text", "帮助文档未配置")
+        txt = self.flat.get("help_text", "帮助文档未配置")
         bot_id = self._get_bot_id(event) or "2854196310"
         return event.chain_result([Nodes(nodes=[Node(name="手办化助手", uin=bot_id, content=[Plain(txt)])])])
 
@@ -2973,12 +2984,12 @@ class FigurineProPlugin(Star):
         await self.data_mgr.add_user_prompt(k, v)
 
         # 同时更新到配置文件的 prompt_list 中，确保双重持久化
-        prompt_list = self.conf.get("prompt_list", [])
+        prompt_list = self.flat.get("prompt_list", [])
         # 移除已存在的同名预设
         prompt_list = [item for item in prompt_list if not item.startswith(f"{k}:")]
         # 添加新预设
         prompt_list.append(f"{k}:{v}")
-        self.conf["prompt_list"] = prompt_list
+        self.flat["prompt_list"] = prompt_list
         self._save_config(["prompt_list"])
 
         yield event.chain_result([Plain(f"✅ 已添加预设: {k}\n💾 已同步保存到配置文件")])
@@ -2999,7 +3010,7 @@ class FigurineProPlugin(Star):
             yield event.chain_result([Plain("用法: #lm删除 <预设名>\n例如: #lm删除 手办化新版")])
             return
 
-        prompt_list = self.conf.get("prompt_list", [])
+        prompt_list = self.flat.get("prompt_list", [])
         if not isinstance(prompt_list, list):
             prompt_list = []
 
@@ -3026,7 +3037,7 @@ class FigurineProPlugin(Star):
         removed_runtime = await self.data_mgr.remove_user_prompt(name)
         new_prompt_list = [item for item in prompt_list if _prompt_list_key(item) != name]
         removed_config = len(new_prompt_list) != len(prompt_list)
-        self.conf["prompt_list"] = new_prompt_list
+        self.flat["prompt_list"] = new_prompt_list
 
         # 删除这个预设绑定的参考图，避免列表里没有预设但参考图索引还残留。
         ref_count = await self.data_mgr.clear_preset_ref_images(name)
@@ -3062,7 +3073,7 @@ class FigurineProPlugin(Star):
             yield event.chain_result([Plain("用法: #手办化切换源 <序号>\n使用 #手办化查看源 查看可用信息源")])
             return
         idx = int(parts[1])
-        image_sources = [s for s in self.conf.get("generic_sources", []) if not str(s.get("video_model", "")).strip()]
+        image_sources = [s for s in self.flat.get("generic_sources", []) if not str(s.get("video_model", "")).strip()]
         if idx < 1 or idx > len(image_sources):
             yield event.chain_result([Plain(f"序号无效，当前有 {len(image_sources)} 个图片源。使用 #手办化查看源 查看。")])
             return
@@ -3082,7 +3093,7 @@ class FigurineProPlugin(Star):
             yield event.chain_result([Plain("用法: #手办化切换视频源 <序号>\n使用 #手办化查看源 查看视频源列表")])
             return
         idx = int(parts[1])
-        video_sources = [s for s in self.conf.get("generic_sources", []) if str(s.get("video_model", "")).strip()]
+        video_sources = [s for s in self.flat.get("generic_sources", []) if str(s.get("video_model", "")).strip()]
         if idx < 1 or idx > len(video_sources):
             yield event.chain_result([Plain(f"序号无效，当前有 {len(video_sources)} 个视频源。使用 #手办化查看源 查看。")])
             return
@@ -3098,7 +3109,7 @@ class FigurineProPlugin(Star):
         """#手办化查看源 - 查看所有信息源"""
         if not self.is_admin(event): return
 
-        sources = self.conf.get("generic_sources", [])
+        sources = self.flat.get("generic_sources", [])
         if not sources:
             yield event.chain_result([Plain("未配置任何 API 信息源，请在 WebUI 配置页面中添加。")])
             return
@@ -3112,8 +3123,8 @@ class FigurineProPlugin(Star):
             else:
                 image_sources.append(src)
 
-        active_img_idx = int(self.conf.get("generic_active_source", 1))
-        active_vid_idx = int(self.conf.get("generic_active_video_source", 1))
+        active_img_idx = int(self.flat.get("generic_active_source", 1))
+        active_vid_idx = int(self.flat.get("generic_active_video_source", 1))
 
         lines = []
 
@@ -3259,28 +3270,29 @@ class FigurineProPlugin(Star):
     # ================= 上下文记录与 LLM 智能判断 =================
 
     def _extract_message_info(self, event: AstrMessageEvent) -> Dict[str, Any]:
-        """从事件中提取消息信息"""
+        """从事件中提取消息信息，分离当前消息图片、引用图片和原始CDN链接。"""
         has_image = False
         image_urls = []
+        current_image_urls = []
+        reply_image_urls = []
         content_parts = []
 
         for seg in event.message_obj.message:
             if isinstance(seg, Image):
                 has_image = True
-
                 seg_url = getattr(seg, "url", None)
                 seg_file = getattr(seg, "file", None)
 
-                if self.img_mgr._is_probably_valid_source(seg_url):
-                    image_urls.append(seg_url)
-                elif self.img_mgr._is_probably_valid_source(seg_file):
-                    image_urls.append(seg_file)
-
+                url = seg_url if self.img_mgr._is_probably_valid_source(seg_url) else (
+                    seg_file if self.img_mgr._is_probably_valid_source(seg_file) else None
+                )
+                if url:
+                    image_urls.append(url)
+                    current_image_urls.append(url)
                 content_parts.append("[图片]")
             elif isinstance(seg, Plain) and seg.text:
                 content_parts.append(seg.text)
             elif isinstance(seg, Reply):
-                # 检查回复中是否有图片
                 if seg.chain:
                     for s_chain in seg.chain:
                         if isinstance(s_chain, Image):
@@ -3288,15 +3300,36 @@ class FigurineProPlugin(Star):
                             chain_url = getattr(s_chain, "url", None)
                             chain_file = getattr(s_chain, "file", None)
 
-                            if self.img_mgr._is_probably_valid_source(chain_url):
-                                image_urls.append(chain_url)
-                            elif self.img_mgr._is_probably_valid_source(chain_file):
-                                image_urls.append(chain_file)
+                            url = chain_url if self.img_mgr._is_probably_valid_source(chain_url) else (
+                                chain_file if self.img_mgr._is_probably_valid_source(chain_file) else None
+                            )
+                            if url:
+                                image_urls.append(url)
+                                reply_image_urls.append(url)
+
+        # 方案B: 从原始OneBot事件中提取QQ CDN链接（AstrBot预处理前的真实URL）
+        cdn_urls = []
+        raw_msg = getattr(event.message_obj, "raw_message", None)
+        if raw_msg is not None:
+            raw_segments = (getattr(raw_msg, "message", None)
+                            or (raw_msg.get("message") if isinstance(raw_msg, dict) else None)
+                            or [])
+            for seg in raw_segments:
+                if not isinstance(seg, dict) or seg.get("type") != "image":
+                    continue
+                data = seg.get("data") or {}
+                url = data.get("url", "")
+                if isinstance(url, str) and url.startswith(("http://", "https://")):
+                    if url not in cdn_urls:
+                        cdn_urls.append(url)
 
         return {
             "content": "".join(content_parts) or event.message_str,
             "has_image": has_image,
-            "image_urls": image_urls
+            "image_urls": image_urls,
+            "current_image_urls": current_image_urls,
+            "reply_image_urls": reply_image_urls,
+            "cdn_urls": cdn_urls,
         }
 
     async def _collect_input_image_urls(self, event: AstrMessageEvent,
@@ -3304,26 +3337,62 @@ class FigurineProPlugin(Star):
                                          max_images: int = 3) -> List[str]:
         """收集输入图片的可访问链接，供只接受图片链接的协议（如落心秋API）使用。
 
-        先取当前消息（含引用消息）中的图片链接，没有再回退到最近会话上下文；
-        只保留 http(s) 链接，本地路径与 base64 对远端接口不可用。
+        优先级：
+        1. 方案B: 从原始OneBot事件中提取QQ CDN链接（当前消息图片）
+        2. 方案A: 本地文件上传到AstrBot文件服务转成公网链接（引用消息图片兜底）
+        3. 会话上下文回退
 
         Args:
             event: 消息事件
-            allow_context: 当前消息没有链接时，是否回退到会话上下文
-            max_images: 从上下文回退时最多收集的图片数量
+            allow_context: 当前消息没有可访问图片时，是否回退到会话上下文
+            max_images: 最多收集的图片数量
 
         Returns:
             http(s) 图片链接列表，可能为空。
         """
-        def http_only(urls: List[str]) -> List[str]:
-            return [
-                str(u).strip() for u in urls
-                if isinstance(u, str) and str(u).strip().startswith(("http://", "https://"))
-            ]
+        async def to_public(url) -> str:
+            """把单个图片引用转成公网 http(s) 链接。
 
-        current_urls = http_only(self._extract_message_info(event).get("image_urls", []))
+            已是 http(s) 链接原样返回；本地文件路径上传到文件服务生成临时公网链接；
+            无法访问（base64、缺失文件、未配置 callback_api_base）返回空串。
+
+            Args:
+                url: 图片引用，可能为 http(s) 链接或本地文件路径。
+
+            Returns:
+                可访问的 http(s) 链接；失败时返回空串。
+            """
+            value = str(url).strip()
+            if value.startswith(("http://", "https://")):
+                return value
+            if value.startswith("base64://"):
+                return ""
+            try:
+                return await Image(file=value).register_to_file_service()
+            except Exception:
+                return ""
+
+        msg_info = self._extract_message_info(event)
+
+        # --- 方案B: 当前消息图片优先使用原始CDN链接 ---
+        cdn_urls = msg_info.get("cdn_urls", [])
+        current_urls: list[str] = list(cdn_urls)
+
+        if cdn_urls:
+            # CDN已覆盖当前消息图片，仅上传引用消息图片
+            for url in msg_info.get("reply_image_urls", []):
+                public_url = await to_public(url)
+                if public_url and public_url not in current_urls:
+                    current_urls.append(public_url)
+        else:
+            # 无CDN链接，所有本地图片均需上传（当前消息+引用消息）
+            for url in msg_info.get("current_image_urls", []) + msg_info.get("reply_image_urls", []):
+                public_url = await to_public(url)
+                if public_url and public_url not in current_urls:
+                    current_urls.append(public_url)
+
         if current_urls or not allow_context:
-            return current_urls
+            return current_urls[:max_images]
 
         image_sources = await self._collect_images_from_context(
             event.unified_msg_origin,
@@ -3333,9 +3402,11 @@ class FigurineProPlugin(Star):
         )
         context_urls = []
         for _, urls in reversed(image_sources):
-            for url in http_only(urls):
-                if url not in context_urls:
-                    context_urls.append(url)
+            for url in urls:
+                if isinstance(url, str):
+                    public_url = await to_public(url)
+                    if public_url and public_url not in context_urls:
+                        context_urls.append(public_url)
             if len(context_urls) >= max_images:
                 break
         return context_urls[:max_images]
@@ -3983,9 +4054,9 @@ class FigurineProPlugin(Star):
         if not wait_for_generation:
             return await collect_once()
 
-        max_wait_seconds = max(0, self.conf.get("pdf_wait_timeout", 120))
-        poll_interval = max(1, self.conf.get("pdf_wait_poll_interval", 2))
-        stable_rounds_required = max(1, self.conf.get("pdf_wait_stable_rounds", 2))
+        max_wait_seconds = max(0, self.flat.get("pdf_wait_timeout", 120))
+        poll_interval = max(1, self.flat.get("pdf_wait_poll_interval", 2))
+        stable_rounds_required = max(1, self.flat.get("pdf_wait_stable_rounds", 2))
 
         waited = 0
         last_count = -1
@@ -4171,7 +4242,7 @@ class FigurineProPlugin(Star):
         try:
             # 加载预设参考图（如果有）
             images = [image_bytes]
-            if preset_name != "自定义" and self.conf.get("enable_preset_ref_images", True):
+            if preset_name != "自定义" and self.flat.get("enable_preset_ref_images", True):
                 ref_images = await self._load_preset_ref_images(preset_name)
                 if ref_images:
                     images = ref_images + images
@@ -4281,7 +4352,7 @@ class FigurineProPlugin(Star):
 
         try:
             # 2. 等待所有后台生成任务完成，并收集暂存的图片
-            pdf_wait_timeout = max(30, self.conf.get("pdf_wait_timeout", 120))
+            pdf_wait_timeout = max(30, self.flat.get("pdf_wait_timeout", 120))
             valid_images_bytes = await self._wait_for_all_generations_and_collect(
                 session_id, timeout=pdf_wait_timeout
             )
@@ -4360,12 +4431,12 @@ class FigurineProPlugin(Star):
             event=event,
             prompt=prompt,
             max_images=max_images,
-            concurrency=self.conf.get("batch_concurrency", 3),
+            concurrency=self.flat.get("batch_concurrency", 3),
             output_as_pdf=output_as_pdf
         )
 
         # 0. 读取配置中的限制
-        conf_max_images = self.conf.get("batch_max_images", 10)
+        conf_max_images = self.flat.get("batch_max_images", 10)
         max_images = min(max_images, conf_max_images) if max_images > 0 else conf_max_images
 
         # 0. 检查 LLM 工具开关
@@ -4454,7 +4525,7 @@ class FigurineProPlugin(Star):
             success_count = 0
             fail_count = 0
             failed_details = []  # 记录失败详情
-            max_retries = self.conf.get("batch_retries", 2)
+            max_retries = self.flat.get("batch_retries", 2)
             pdf_result_images = []  # 如果要打PDF，这里存最后生成的 bytes
 
             for i, url in enumerate(all_image_urls, 1):
@@ -4492,7 +4563,7 @@ class FigurineProPlugin(Star):
                             # 考虑到原有架构，这里写个临时内部函数以复用生成逻辑
                             try:
                                 images = [img_bytes]
-                                if preset_name != "自定义" and self.conf.get("enable_preset_ref_images", True):
+                                if preset_name != "自定义" and self.flat.get("enable_preset_ref_images", True):
                                     ref_images = await self._load_preset_ref_images(preset_name)
                                     if ref_images:
                                         images = ref_images + images
@@ -4638,8 +4709,8 @@ class FigurineProPlugin(Star):
             output_as_pdf(boolean): 用户是否明确要求将生成的多张图片打包成PDF输出，默认False
         '''
         # 读取配置中的限制，强制覆盖 LLM 参数
-        conf_max_images = self.conf.get("batch_max_images", 10)
-        conf_concurrency = self.conf.get("batch_concurrency", 3)
+        conf_max_images = self.flat.get("batch_max_images", 10)
+        conf_concurrency = self.flat.get("batch_concurrency", 3)
         max_images = min(max_images, conf_max_images) if max_images > 0 else conf_max_images
         concurrency = max(1, conf_concurrency)
 
@@ -4728,7 +4799,7 @@ class FigurineProPlugin(Star):
         failed_details = []
         pdf_result_images_dict = {}  # 用于保证并发生成的图片顺序
         results_lock = asyncio.Lock()
-        max_retries = self.conf.get("batch_retries", 2)
+        max_retries = self.flat.get("batch_retries", 2)
 
         async def process_single(index: int, url: str):
             async with semaphore:
@@ -4763,7 +4834,7 @@ class FigurineProPlugin(Star):
                         if output_as_pdf:
                             try:
                                 images = [img_bytes]
-                                if preset_name != "自定义" and self.conf.get("enable_preset_ref_images", True):
+                                if preset_name != "自定义" and self.flat.get("enable_preset_ref_images", True):
                                     ref_images = await self._load_preset_ref_images(preset_name)
                                     if ref_images:
                                         images = ref_images + images
@@ -4973,12 +5044,12 @@ class FigurineProPlugin(Star):
 
         # 0.1 检查图片生成冷却时间
         uid = norm_id(event.get_sender_id())
-        persona_id = int(self.conf.get("current_persona", 1))
+        persona_id = int(self.flat.get("current_persona", 1))
         user_text = event.message_str.strip()
 
         # 0.2 人设名自动匹配：用户消息中包含某个人设名时，自动切换到该人设
         # 例如 "mm,看看你的跑步照片" → 自动使用名为 mm 的人设参考图
-        persona_list = self.conf.get("persona_list", [])
+        persona_list = self.flat.get("persona_list", [])
         if persona_list:
             for idx, p in enumerate(persona_list):
                 p_name = str(p.get("persona_name", "")).strip()
@@ -5369,7 +5440,7 @@ class FigurineProPlugin(Star):
 
         if count > 0:
             total = len(self.data_mgr.get_preset_ref_image_paths(key))
-            persona_id = int(self.conf.get("current_persona", 1))
+            persona_id = int(self.flat.get("current_persona", 1))
             yield event.chain_result([Plain(f"✅ 已添加 {count} 张参考图到人设 {persona_id}\n当前人设共 {total} 张参考图")])
         else:
             yield event.chain_result([Plain("参考图保存失败了，再试试？")])
@@ -5387,7 +5458,7 @@ class FigurineProPlugin(Star):
                 return
 
         ref_images = await self._load_persona_ref_images()
-        persona_id = int(self.conf.get("current_persona", 1))
+        persona_id = int(self.flat.get("current_persona", 1))
 
         if not ref_images:
             yield event.chain_result([Plain("人设参考图加载失败")])
@@ -5413,7 +5484,7 @@ class FigurineProPlugin(Star):
         if count == 0:
             count = await self.data_mgr.clear_preset_ref_images("_persona_")
 
-        persona_id = int(self.conf.get("current_persona", 1))
+        persona_id = int(self.flat.get("current_persona", 1))
         if count > 0:
             yield event.chain_result([Plain(f"✅ 已清除人设 {persona_id} 的 {count} 张参考图")])
         else:
@@ -5447,7 +5518,7 @@ class FigurineProPlugin(Star):
         persona_desc = persona.get("persona_description", "一个可爱的二次元女孩")
         photo_style = persona.get("persona_photo_style", "")
         trigger_keywords = persona.get("persona_trigger_keywords", [])
-        current_id = int(self.conf.get("current_persona", 1))
+        current_id = int(self.flat.get("current_persona", 1))
 
         ref_images = await self._load_persona_ref_images()
         ref_count = len(ref_images) if ref_images else 0
@@ -5469,7 +5540,7 @@ class FigurineProPlugin(Star):
         """查看所有人设及其参考图数量"""
         if not self.is_admin(event): return
 
-        current_id = int(self.conf.get("current_persona", 1))
+        current_id = int(self.flat.get("current_persona", 1))
         persona_name = self._get_active_persona().get("persona_name", "小助手")
 
         # 扫描所有人设（_persona_N_ 格式）
@@ -5532,7 +5603,7 @@ class FigurineProPlugin(Star):
         用法: #批量<预设名> [追加规则]
         示例: #批量手办化 皮肤白一点
         """
-        if self.conf.get("prefix", True) and not event.is_at_or_wake_command:
+        if self.flat.get("prefix", True) and not event.is_at_or_wake_command:
             return
 
         text = event.message_str.strip()
@@ -5578,7 +5649,7 @@ class FigurineProPlugin(Star):
         # 1. 提取当前消息的图片 URL（包括引用消息中的图片）
         msg_info = self._extract_message_info(event)
         current_urls = msg_info.get("image_urls", [])
-        max_images = self.conf.get("batch_max_images", 10)
+        max_images = self.flat.get("batch_max_images", 10)
 
         # 2. 获取上下文中的图片
         uid = norm_id(event.get_sender_id())
@@ -5606,7 +5677,7 @@ class FigurineProPlugin(Star):
         # 计算预设和追加规则
         final_prompt, preset_name, extra_rules = self._process_prompt_and_preset(prompt)
 
-        concurrency = max(1, self.conf.get("batch_concurrency", 3))
+        concurrency = max(1, self.flat.get("batch_concurrency", 3))
 
         # 发送开始提示
         _internal3 = {"自定义", "编辑", "edit", "custom"}
@@ -5623,7 +5694,7 @@ class FigurineProPlugin(Star):
         results = {"success": 0, "fail": 0}
         failed_details = []
         results_lock = asyncio.Lock()
-        max_retries = self.conf.get("batch_retries", 2)
+        max_retries = self.flat.get("batch_retries", 2)
 
         async def process_single(index: int, url: str):
             async with semaphore:
