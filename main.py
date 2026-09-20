@@ -39,7 +39,7 @@ _CLOTHING_KEYWORDS = [
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方OpenAI绘图格式的文生图/图生图插件，支持多源API配置和LLM智能判断",
-    "3.1.1",
+    "3.1.2",
     "https://github.com/Qiscard/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -80,6 +80,8 @@ class FigurineProPlugin(Star):
         # Flat view over the nested object-grouped config: existing flat-key
         # reads keep working, schema-external runtime keys fall to top level.
         self.flat = FlatConfigView(config, getattr(config, "schema", None))
+        # Restore runtime selections before loading persona-dependent caches.
+        self._restore_runtime_state()
 
         self.data_mgr = DataManager(StarTools.get_data_dir(), self.flat)
         self.img_mgr = ImageManager(self.flat)
@@ -512,9 +514,6 @@ class FigurineProPlugin(Star):
         if removed_from_runtime > 0:
             logger.info(f"FigurinePro: 已从运行时配置中清理 {removed_from_runtime} 个废弃强力模式字段")
 
-        # Restore schema-external runtime keys (active source / persona index).
-        self._restore_runtime_state()
-
         await self.data_mgr.initialize()
         self.img_mgr.schedule_default_font_install(self.data_mgr.data_dir)
         if not self.flat.get("generic_sources", []):
@@ -522,7 +521,7 @@ class FigurineProPlugin(Star):
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
         logger.info(
-            f"FigurinePro 插件已加载 v3.1.1 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
+            f"FigurinePro 插件已加载 v3.1.2 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 
     def is_admin(self, event: AstrMessageEvent) -> bool:
         return event.get_sender_id() in self.context.get_config().get("admins_id", [])
