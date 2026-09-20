@@ -39,7 +39,7 @@ _CLOTHING_KEYWORDS = [
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方OpenAI绘图格式的文生图/图生图插件，支持多源API配置和LLM智能判断",
-    "3.1.2",
+    "3.1.3",
     "https://github.com/Qiscard/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -521,7 +521,7 @@ class FigurineProPlugin(Star):
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
         logger.info(
-            f"FigurinePro 插件已加载 v3.1.2 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
+            f"FigurinePro 插件已加载 v3.1.3 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 
     def is_admin(self, event: AstrMessageEvent) -> bool:
         return event.get_sender_id() in self.context.get_config().get("admins_id", [])

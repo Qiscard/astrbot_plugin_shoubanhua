@@ -14,6 +14,8 @@ help: |
   - #手办化查看源 - 查看所有信息源、Key和模型
   - #上下文状态 - 查看上下文状态
   - #清除上下文 - 清除当前会话上下文
-version: 3.1.2
+
+  WebUI 配置支持通过「配置分组」下拉菜单切换 API、网络、LLM、预设与人设等配置类别。
+version: 3.1.3
 author: shskjw
 repo: https://github.com/Qiscard/astrbot_plugin_shoubanhua
